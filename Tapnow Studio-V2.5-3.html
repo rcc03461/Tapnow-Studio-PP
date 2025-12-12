@@ -3369,7 +3369,7 @@
             const pollImageTask = (taskId, taskIdForPoll, baseUrl, apiKey, w, h, sourceNodeId, attempt = 0, isBananaModel = false) => {
                 // banana模型使用800秒超时（160次 * 5秒），其他模型使用25分钟（300次 * 5秒）
                 const maxAttempts = isBananaModel ? 160 : 300;
-                const delayMs = 5000; // 每5秒轮询一次
+                const baseDelayMs = 5000; // 基础轮询间隔5秒
 
                 if (attempt > maxAttempts) {
                     const timeoutSeconds = isBananaModel ? 800 : 1500;
@@ -3498,15 +3498,48 @@
                                         
                                         if (imageUrls.length > 0) {
                                             const primaryUrl = imageUrls[0];
-                                            const endTime = Date.now();
-                                            const durationMs = endTime - (hItem.startTime || endTime);
+                                            
+                                            // 优先使用后端返回的实际花费时间（如果存在）
+                                            // 后端可能返回的字段：duration, cost_time, elapsed_time, time_cost, spent_time 等（单位可能是秒或毫秒）
+                                            let durationMs = null;
+                                            const backendDuration = data?.data?.duration || data?.data?.cost_time || data?.data?.elapsed_time || 
+                                                                  data?.data?.time_cost || data?.data?.spent_time || data?.duration || 
+                                                                  data?.cost_time || data?.elapsed_time || data?.time_cost || data?.spent_time;
+                                            
+                                            if (backendDuration !== null && backendDuration !== undefined) {
+                                                // 如果后端返回的是秒（数字<10000），转换为毫秒；否则认为是毫秒
+                                                if (typeof backendDuration === 'number') {
+                                                    durationMs = backendDuration < 10000 ? backendDuration * 1000 : backendDuration;
+                                                } else if (typeof backendDuration === 'string') {
+                                                    // 尝试解析字符串格式的时间（如 "49.0s", "107.0s"）
+                                                    const match = backendDuration.match(/(\d+\.?\d*)\s*(s|ms|秒|毫秒)/i);
+                                                    if (match) {
+                                                        const value = parseFloat(match[1]);
+                                                        const unit = match[2].toLowerCase();
+                                                        durationMs = (unit === 's' || unit === '秒') ? value * 1000 : value;
+                                                    } else {
+                                                        const parsed = parseFloat(backendDuration);
+                                                        if (!isNaN(parsed)) {
+                                                            durationMs = parsed < 10000 ? parsed * 1000 : parsed;
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            
+                                            // 如果后端没有返回时间，使用前端计算的时间
+                                            if (durationMs === null) {
+                                                const endTime = Date.now();
+                                                durationMs = endTime - (hItem.startTime || endTime);
+                                            }
                                             
                                             console.log('[Async Image] 任务完成，准备更新UI:', { 
                                                 taskId, 
                                                 url: primaryUrl, 
                                                 sourceNodeId: savedSourceNodeId, 
                                                 imageCount: imageUrls.length,
-                                                durationMs 
+                                                durationMs,
+                                                backendDuration,
+                                                frontendCalculated: durationMs === null ? null : (Date.now() - (hItem.startTime || Date.now()))
                                             });
                                             
                                             // 更新预览窗口（在setHistory回调外执行，使用保存的sourceNodeId）
@@ -3577,8 +3610,36 @@
                                         const foundUrl = deepSearchForUrl(data);
                                         if (foundUrl) {
                                             console.log('[Async Image] 通过深度搜索找到图片URL:', foundUrl);
-                                            const endTime = Date.now();
-                                            const durationMs = endTime - (hItem.startTime || endTime);
+                                            
+                                            // 优先使用后端返回的实际花费时间（如果存在）
+                                            let durationMs = null;
+                                            const backendDuration = data?.data?.duration || data?.data?.cost_time || data?.data?.elapsed_time || 
+                                                                  data?.data?.time_cost || data?.data?.spent_time || data?.duration || 
+                                                                  data?.cost_time || data?.elapsed_time || data?.time_cost || data?.spent_time;
+                                            
+                                            if (backendDuration !== null && backendDuration !== undefined) {
+                                                if (typeof backendDuration === 'number') {
+                                                    durationMs = backendDuration < 10000 ? backendDuration * 1000 : backendDuration;
+                                                } else if (typeof backendDuration === 'string') {
+                                                    const match = backendDuration.match(/(\d+\.?\d*)\s*(s|ms|秒|毫秒)/i);
+                                                    if (match) {
+                                                        const value = parseFloat(match[1]);
+                                                        const unit = match[2].toLowerCase();
+                                                        durationMs = (unit === 's' || unit === '秒') ? value * 1000 : value;
+                                                    } else {
+                                                        const parsed = parseFloat(backendDuration);
+                                                        if (!isNaN(parsed)) {
+                                                            durationMs = parsed < 10000 ? parsed * 1000 : parsed;
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            
+                                            // 如果后端没有返回时间，使用前端计算的时间
+                                            if (durationMs === null) {
+                                                const endTime = Date.now();
+                                                durationMs = endTime - (hItem.startTime || endTime);
+                                            }
                                             
                                             // 更新预览窗口（使用保存的sourceNodeId）
                                             // 即使savedSourceNodeId为空，也尝试调用updatePreviewFromTask，它会从history中查找
@@ -3664,25 +3725,55 @@
                         return hItem;
                     });
                     
+                    // 获取更新后的进度，用于动态调整轮询间隔
+                    const updatedItem = updated.find(h => h.id === taskId);
+                    const currentProgress = updatedItem?.progress || 10;
+                    
                     return updated;
                 });
 
                     // 如果任务未完成，继续轮询
-                    // 对于慢任务，如果已经轮询了很多次，可以适当增加间隔
+                    // 动态调整轮询间隔：任务接近完成时缩短间隔，确保能快速检测到完成状态
                     const currentStatus = (data?.data?.status || data?.status || '').toUpperCase();
                     const isCompleted = currentStatus === 'COMPLETED' || currentStatus === 'SUCCESS' || currentStatus === 'FINISHED' || currentStatus === 'DONE';
                     const isFailed = currentStatus === 'FAILED' || currentStatus === 'ERROR' || currentStatus === 'CANCELLED' || currentStatus === 'FAILURE';
                     
                     if (!isCompleted && !isFailed) {
-                        // 如果已经轮询了很多次（超过50次，约4分钟），增加轮询间隔到10秒
-                        // banana模型由于超时时间更长，可以保持5秒间隔
-                        const adjustedDelay = (attempt > 50 && !isBananaModel) ? 10000 : delayMs;
-                        setTimeout(() => pollImageTask(taskId, taskIdForPoll, baseUrl, apiKey, w, h, sourceNodeId, attempt + 1, isBananaModel), adjustedDelay);
+                        // 动态轮询间隔策略：
+                        // 1. 任务进度>90%：1秒间隔（快速检测完成）
+                        // 2. 任务进度>70%：2秒间隔（加快检测）
+                        // 3. 任务进度>50%：3秒间隔（中等速度）
+                        // 4. 任务进行中（<50%）：5秒间隔（基础间隔）
+                        // 5. 长时间运行（>50次轮询且非banana模型）：10秒间隔（节省资源）
+                        
+                        // 从更新后的history中获取最新进度来计算延迟
+                        setHistory((prev) => {
+                            const latestItem = prev.find(h => h.id === taskId);
+                            const progress = latestItem?.progress || 10;
+                            
+                            let adjustedDelay = baseDelayMs;
+                            if (progress >= 90) {
+                                adjustedDelay = 1000; // 1秒：任务接近完成，快速检测
+                            } else if (progress >= 70) {
+                                adjustedDelay = 2000; // 2秒：任务进行中后期，加快检测
+                            } else if (progress >= 50) {
+                                adjustedDelay = 3000; // 3秒：任务进行中，中等速度
+                            } else if (attempt > 50 && !isBananaModel) {
+                                adjustedDelay = 10000; // 10秒：长时间运行，节省资源
+                            }
+                            
+                            // 在回调外执行setTimeout，避免闭包问题
+                            setTimeout(() => {
+                                pollImageTask(taskId, taskIdForPoll, baseUrl, apiKey, w, h, sourceNodeId, attempt + 1, isBananaModel);
+                            }, adjustedDelay);
+                            
+                            return prev; // 不修改，只是读取
+                        });
                     }
                 })
                 .catch((err) => {
                     console.error('[Async Image] Poll error:', err);
-                    setTimeout(() => pollImageTask(taskId, taskIdForPoll, baseUrl, apiKey, w, h, sourceNodeId, attempt + 1, isBananaModel), delayMs);
+                    setTimeout(() => pollImageTask(taskId, taskIdForPoll, baseUrl, apiKey, w, h, sourceNodeId, attempt + 1, isBananaModel), baseDelayMs);
                 });
             };
 
