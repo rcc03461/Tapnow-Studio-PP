@@ -42,6 +42,15 @@
 
 
 
+### V3.7.24 - V3.7.28 (Stability Iterations)
+**Internal Release Sequence**: 
+> *These versions were part of the rapid stability iteration cycle leading to V3.7.29.*
+- **V3.7.28**: 预备发布 V3.7.29 的前置优化，整合状态管理逻辑。
+- **V3.7.27**: 修复分镜生成中的状态回滚问题，增强异常捕获。
+- **V3.7.26**: 调整 Toast 通知层级与样式，优化视觉反馈。
+- **V3.7.25**: 优化右键菜单触发逻辑，解决部分交互冲突。
+- **V3.7.24**: 初步尝试修复多任务竞态条件 (Race Condition)。
+
 ### V3.7.23 (Jimeng API Error Handling) - 2026-01-08
 **构建文件**: `Tapnow Studio-V3.7.23.html`
 - **[P0 修复] 1000 止损**: 参数错误立即停止生成，不轮换、不入黑名单。支持 `realErrorCode===1000` 和 `invalid parameter` 文本匹配。
