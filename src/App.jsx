@@ -472,6 +472,7 @@ const HistoryItem = memo(({
     onImageClick,
     onImageContextMenu,
     onRefresh,
+    onRebuildThumbnail,
     performanceMode, // V2.6.1 Feature
     localServerUrl, // V2.6.1 Feature
     localCacheServerConnected,
@@ -484,12 +485,46 @@ const HistoryItem = memo(({
     const localCacheFallback = item.localCacheUrl || (item.localCacheMap ? Object.values(item.localCacheMap)[0] : null);
     const hasLocalCache = !!(localCacheServerConnected && localCacheFallback);
     const thumbnailUrl = item.thumbnailUrl || null;
+    const canDrag = item.status === 'completed' && (item.type === 'image' || (item.mjImages && item.mjImages.length > 0));
     const getDisplayUrl = (originalUrl) => {
         if (hasLocalCache) return localCacheFallback;
-        if (thumbnailUrl) return thumbnailUrl;
+        if (performanceMode !== 'off' && thumbnailUrl) return thumbnailUrl;
         return originalUrl;
     };
     const [videoSrc, setVideoSrc] = useState(null);
+    const getDragUrl = (specificUrl = null) => {
+        if (specificUrl) {
+            if (localCacheServerConnected && item.localCacheMap && item.localCacheMap[specificUrl]) {
+                return item.localCacheMap[specificUrl];
+            }
+            return specificUrl;
+        }
+        if (item.mjImages && item.mjImages.length > 0) {
+            const index = item.selectedMjImageIndex ?? 0;
+            const selected = item.mjImages[index] || item.mjImages[0];
+            if (selected) {
+                if (localCacheServerConnected && item.localCacheMap && item.localCacheMap[selected]) {
+                    return item.localCacheMap[selected];
+                }
+                return selected;
+            }
+        }
+        return item.originalUrl || item.mjOriginalUrl || item.url || item.localCacheUrl || (item.localCacheMap ? Object.values(item.localCacheMap)[0] : '') || '';
+    };
+    const handleDragStart = (e, specificUrl = null) => {
+        const dragUrl = getDragUrl(specificUrl);
+        if (!dragUrl) return;
+        const payload = {
+            source: 'history',
+            itemId: item.id,
+            url: dragUrl,
+            selectedIndex: item.selectedMjImageIndex ?? 0
+        };
+        e.dataTransfer.effectAllowed = 'copy';
+        e.dataTransfer.setData('application/x-tapnow-history', JSON.stringify(payload));
+        e.dataTransfer.setData('text/uri-list', dragUrl);
+        e.dataTransfer.setData('text/plain', dragUrl);
+    };
 
     useEffect(() => {
         const fallback = item.url || item.originalUrl || item.mjOriginalUrl;
@@ -524,6 +559,8 @@ const HistoryItem = memo(({
             }}
             onClick={onClick}
             onContextMenu={onContextMenu}
+            draggable={canDrag}
+            onDragStart={canDrag ? (e) => handleDragStart(e) : undefined}
         >
             {/* 性能/本地缓存标识 */}
             {hasLocalCache && (
@@ -572,7 +609,7 @@ const HistoryItem = memo(({
                                 const imgInfo = item.mjImageInfo && item.mjImageInfo[idx];
                                 const cachedImgUrl = localCacheServerConnected && item.localCacheMap ? item.localCacheMap[imgUrl] : null;
                                 const displayImgUrl = cachedImgUrl
-                                    || (item.mjThumbnails && item.mjThumbnails[idx]
+                                    || (performanceMode !== 'off' && item.mjThumbnails && item.mjThumbnails[idx]
                                         ? item.mjThumbnails[idx]
                                         : imgUrl);
                                 return (
@@ -580,6 +617,12 @@ const HistoryItem = memo(({
                                         key={idx}
                                         onClick={(e) => onImageClick && onImageClick(e, item, imgUrl, idx)}
                                         onContextMenu={(e) => onImageContextMenu && onImageContextMenu(e, item, imgUrl, idx)}
+                                        onDragStart={(e) => {
+                                            if (!canDrag) return;
+                                            e.stopPropagation();
+                                            handleDragStart(e, imgUrl);
+                                        }}
+                                        draggable={canDrag}
                                         className={`relative w-full h-full cursor-pointer border-2 transition-all overflow-hidden ${item.selectedMjImageIndex === idx && lightboxItem && lightboxItem.id === item.id
                                             ? 'border-blue-500 scale-95'
                                             : 'border-transparent hover:border-blue-500/50'
@@ -678,6 +721,21 @@ const HistoryItem = memo(({
                                 <RefreshCw size={12} />
                             </button>
                         )}
+                        {item.type === 'image' && (
+                            <button
+                                onClick={(e) => {
+                                    e.stopPropagation();
+                                    onRebuildThumbnail && onRebuildThumbnail(item);
+                                }}
+                                className={`shrink-0 p-0.5 rounded ${theme === 'dark'
+                                    ? 'text-blue-300 hover:text-blue-200 hover:bg-blue-500/20'
+                                    : 'text-blue-500 hover:text-blue-600 hover:bg-blue-100'
+                                    }`}
+                                title="重建缩略图"
+                            >
+                                <RefreshCw size={12} />
+                            </button>
+                        )}
                         <button
                             onClick={(e) => { e.stopPropagation(); onDelete && onDelete(item.id); }}
                             className={`shrink-0 p-0.5 ${theme === 'dark'
@@ -747,7 +805,9 @@ const HistoryItem = memo(({
         prevProps.item === nextProps.item &&
         prevProps.theme === nextProps.theme &&
         prevProps.lightboxItem?.id === nextProps.lightboxItem?.id &&
-        prevProps.isSelected === nextProps.isSelected  // V3.5.5: 添加选择状态检查
+        prevProps.isSelected === nextProps.isSelected &&
+        prevProps.performanceMode === nextProps.performanceMode &&
+        prevProps.localCacheServerConnected === nextProps.localCacheServerConnected
     );
 });
 
@@ -761,18 +821,41 @@ const MaskEditor = ({ nodeId, imageUrl, imageDimensions, isActive, onClose, onSa
     const [history, setHistory] = useState([]);
     const [historyIndex, setHistoryIndex] = useState(-1);
     const maxHistory = 10;
+    const [resolvedDimensions, setResolvedDimensions] = useState(imageDimensions);
+
+    useEffect(() => {
+        if (imageDimensions?.w && imageDimensions?.h) {
+            setResolvedDimensions(imageDimensions);
+        }
+    }, [imageDimensions]);
+
+    useEffect(() => {
+        if (!isActive || !imageUrl) return;
+        if (imageDimensions?.w && imageDimensions?.h) return;
+        let cancelled = false;
+        getImageDimensions(imageUrl)
+            .then((dims) => {
+                if (cancelled) return;
+                if (dims?.w && dims?.h) {
+                    setResolvedDimensions(dims);
+                    if (onUpdateNode) onUpdateNode(nodeId, { dimensions: dims });
+                }
+            })
+            .catch(() => { });
+        return () => { cancelled = true; };
+    }, [isActive, imageUrl, imageDimensions, nodeId, onUpdateNode]);
 
     // 初始化 Canvas
     useEffect(() => {
-        if (!isActive || !canvasRef.current || !imageDimensions) return;
+        if (!isActive || !canvasRef.current || !resolvedDimensions) return;
 
         const canvas = canvasRef.current;
         const ctx = canvas.getContext('2d');
         ctxRef.current = ctx;
 
         // 设置 Canvas 尺寸为图片原始分辨率
-        canvas.width = imageDimensions.w;
-        canvas.height = imageDimensions.h;
+        canvas.width = resolvedDimensions.w;
+        canvas.height = resolvedDimensions.h;
 
         // 清空画布（透明背景）
         ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -788,7 +871,7 @@ const MaskEditor = ({ nodeId, imageUrl, imageDimensions, isActive, onClose, onSa
         } else {
             saveToHistory();
         }
-    }, [isActive, imageDimensions, nodeId, maskContent]);
+    }, [isActive, resolvedDimensions, nodeId, maskContent]);
 
     // 保存当前状态到历史记录
     const saveToHistory = () => {
@@ -927,7 +1010,7 @@ const MaskEditor = ({ nodeId, imageUrl, imageDimensions, isActive, onClose, onSa
         return () => window.removeEventListener('keydown', handleKeyDown);
     }, [isActive, historyIndex, history]);
 
-    if (!isActive || !imageUrl || !imageDimensions) return null;
+    if (!isActive || !imageUrl || !resolvedDimensions) return null;
 
     return (
         <>
@@ -949,7 +1032,7 @@ const MaskEditor = ({ nodeId, imageUrl, imageDimensions, isActive, onClose, onSa
                         mixBlendMode: 'multiply',
                         cursor: 'crosshair',
                         pointerEvents: 'auto',
-                        imageRendering: 'pixelated'
+                        imageRendering: 'auto'
                     }}
                     onMouseDown={handleMouseDown}
                     onMouseMove={handleMouseMove}
@@ -1953,6 +2036,16 @@ function TapnowApp() {
 
     // V3.5.24: Batch Generation State
     const [batchQueue, setBatchQueue] = useState([]); // Array of {nodeId, shotId, retryCount}
+    const [batchGroups, setBatchGroups] = useState([]); // Batch group metadata
+    const batchTaskCounterRef = useRef(new Map()); // nodeId -> taskIndex
+    const shotBatchMapRef = useRef(new Map()); // key: nodeId:shotId -> { batchId, batchOrder, taskIndex }
+    const [batchQueueMode, setBatchQueueMode] = useState(() => {
+        try {
+            return localStorage.getItem('tapnow_batch_queue_mode') || 'parallel';
+        } catch (e) {
+            return 'parallel';
+        }
+    });
     const [batchTick, setBatchTick] = useState(0); // Used to trigger next batch after cooldown
     const [batchConcurrency, setBatchConcurrency] = useState(() => parseInt(localStorage.getItem('tapnow_batch_concurrency') || '1')); // Default 1
     const pendingStartsRef = useRef(new Set()); // Track items that are starting but not yet 'generating' in nodes
@@ -1962,6 +2055,10 @@ function TapnowApp() {
     useEffect(() => {
         localStorage.setItem('tapnow_batch_concurrency', batchConcurrency);
     }, [batchConcurrency]);
+
+    useEffect(() => {
+        localStorage.setItem('tapnow_batch_queue_mode', batchQueueMode);
+    }, [batchQueueMode]);
 
     // 保存当前状态到撤销栈
     const saveToUndoStack = useCallback(() => {
@@ -2092,6 +2189,146 @@ function TapnowApp() {
         }, 5000); // 每5秒检查一次
         return () => clearInterval(interval);
     }, [batchQueue.length > 0]);
+
+    const clearBatchQueue = useCallback((stopRunning = false) => {
+        setBatchQueue([]);
+        pendingStartsRef.current.clear();
+        batchStateRef.current = 'idle';
+        shotBatchMapRef.current.clear();
+
+        if (!stopRunning) return;
+
+        setNodes(prev => prev.map(n => {
+            if (n.type !== 'storyboard-node') return n;
+            const shots = n.settings?.shots || [];
+            let changed = false;
+            const updatedShots = shots.map(s => {
+                if (s.status === 'generating') {
+                    changed = true;
+                    return { ...s, status: 'failed', errorMsg: '已手动终止' };
+                }
+                return s;
+            });
+            if (!changed) return n;
+            return { ...n, settings: { ...n.settings, shots: updatedShots } };
+        }));
+    }, [setBatchQueue, setNodes]);
+
+    const removeQueuedBatchItem = useCallback((nodeId, shotId) => {
+        setBatchQueue(prev => prev.filter(item => !(item.nodeId === nodeId && item.shotId === shotId)));
+        pendingStartsRef.current.delete(`${nodeId}:${shotId}`);
+        updateShot(nodeId, shotId, { status: 'draft', errorMsg: '' });
+    }, [setBatchQueue]);
+
+    const stopRunningShot = useCallback((nodeId, shotId) => {
+        updateShot(nodeId, shotId, { status: 'failed', errorMsg: '已手动终止' });
+    }, []);
+
+    const removeQueuedBatchGroup = useCallback((batchId) => {
+        setBatchQueue(prev => prev.filter(item => {
+            if (item.batchId !== batchId) return true;
+            pendingStartsRef.current.delete(`${item.nodeId}:${item.shotId}`);
+            shotBatchMapRef.current.delete(`${item.nodeId}:${item.shotId}`);
+            updateShot(item.nodeId, item.shotId, { status: 'draft', errorMsg: '' });
+            return false;
+        }));
+    }, [setBatchQueue]);
+
+    const clearNodeQueue = useCallback((nodeId, stopRunning = false) => {
+        setBatchQueue(prev => prev.filter(item => {
+            if (item.nodeId !== nodeId) return true;
+            pendingStartsRef.current.delete(`${item.nodeId}:${item.shotId}`);
+            shotBatchMapRef.current.delete(`${item.nodeId}:${item.shotId}`);
+            return false;
+        }));
+
+        if (!stopRunning) return;
+        setNodes(prev => prev.map(n => {
+            if (n.id !== nodeId || n.type !== 'storyboard-node') return n;
+            const shots = n.settings?.shots || [];
+            let changed = false;
+            const updatedShots = shots.map(s => {
+                if (s.status === 'generating') {
+                    changed = true;
+                    return { ...s, status: 'failed', errorMsg: '已手动终止' };
+                }
+                return s;
+            });
+            if (!changed) return n;
+            return { ...n, settings: { ...n.settings, shots: updatedShots } };
+        }));
+    }, [setBatchQueue, setNodes]);
+
+    const batchQueueItems = useMemo(() => {
+        return batchQueue.map((item, idx) => {
+            const node = nodes.find(n => n.id === item.nodeId);
+            const shots = node?.settings?.shots || [];
+            const shotIndex = shots.findIndex(s => s.id === item.shotId);
+            const shot = shotIndex >= 0 ? shots[shotIndex] : null;
+            return {
+                ...item,
+                order: idx + 1,
+                projectTitle: node?.settings?.projectTitle || '未命名分镜',
+                sceneIndex: shot?.scene_index || (shotIndex >= 0 ? shotIndex + 1 : '?'),
+                taskIndex: item.taskIndex,
+                batchId: item.batchId,
+                batchOrder: item.batchOrder,
+                batchConcurrency: item.batchConcurrency
+            };
+        });
+    }, [batchQueue, nodes]);
+
+    const batchRunningItems = useMemo(() => {
+        const running = [];
+        nodes.forEach(n => {
+            if (n.type !== 'storyboard-node') return;
+            const shots = n.settings?.shots || [];
+            shots.forEach((s, idx) => {
+                if (s.status !== 'generating') return;
+                const batchMeta = shotBatchMapRef.current.get(`${n.id}:${s.id}`) || {};
+                running.push({
+                    nodeId: n.id,
+                    shotId: s.id,
+                    projectTitle: n.settings?.projectTitle || '未命名分镜',
+                    sceneIndex: s.scene_index || idx + 1,
+                    batchId: batchMeta.batchId,
+                    batchOrder: batchMeta.batchOrder,
+                    taskIndex: batchMeta.taskIndex
+                });
+            });
+        });
+        return running;
+    }, [nodes]);
+
+    useEffect(() => {
+        const activeKeys = new Set();
+        batchQueue.forEach(item => {
+            activeKeys.add(`${item.nodeId}:${item.shotId}`);
+        });
+        nodes.forEach(n => {
+            if (n.type !== 'storyboard-node') return;
+            const shots = n.settings?.shots || [];
+            shots.forEach(s => {
+                if (s.status === 'generating') {
+                    activeKeys.add(`${n.id}:${s.id}`);
+                }
+            });
+        });
+
+        if (activeKeys.size === 0) {
+            shotBatchMapRef.current.clear();
+            setBatchGroups([]);
+            return;
+        }
+
+        shotBatchMapRef.current.forEach((value, key) => {
+            if (!activeKeys.has(key)) shotBatchMapRef.current.delete(key);
+        });
+
+        setBatchGroups(prev => prev.filter(group =>
+            group.shotIds.some(shotId => activeKeys.has(`${group.nodeId}:${shotId}`))
+        ));
+    }, [batchQueue, nodes]);
 
     // 撤销操作
     const undo = useCallback(() => {
@@ -2394,11 +2631,11 @@ function TapnowApp() {
             if (savedHistory !== null) {
                 if (savedHistory === 'true') return 'normal';
                 if (savedHistory === 'false') return 'off';
-                return savedHistory || 'normal';
+                return savedHistory || 'off';
             }
-            return localStorage.getItem('tapnow_performance_mode') || 'normal';
+            return localStorage.getItem('tapnow_performance_mode') || 'off';
         } catch (e) {
-            return 'normal';
+            return 'off';
         }
     });
     // 全局性能模式（与历史面板独立）
@@ -2609,6 +2846,7 @@ function TapnowApp() {
     const [settingsOpen, setSettingsOpen] = useState(false);
     const [historyOpen, setHistoryOpen] = useState(false);
     const [historyCachePanelOpen, setHistoryCachePanelOpen] = useState(false);
+    const [historyQueuePanelOpen, setHistoryQueuePanelOpen] = useState(false);
     const [historyFocusIndex, setHistoryFocusIndex] = useState(-1); // V3.7.28: 历史列表键盘导航
     const [charactersOpen, setCharactersOpen] = useState(false);
     const [characterLibrary, setCharacterLibrary] = useState(() => {
@@ -2812,6 +3050,7 @@ function TapnowApp() {
         });
     }, []);
 
+
     const saveImageToLocalCache = useCallback(async (itemId, imageUrl, category = 'history', options = {}) => {
         if (!localCacheServerConnected) return null;
         const baseUrl = (localServerUrl || '').replace(/\/+$/, '');
@@ -2992,7 +3231,7 @@ function TapnowApp() {
             if (localCacheServerConnected && item.localCacheMap && item.localCacheMap[specificUrl]) {
                 return item.localCacheMap[specificUrl];
             }
-            if (item.mjImages && item.mjThumbnails) {
+            if (performanceMode !== 'off' && item.mjImages && item.mjThumbnails) {
                 const idx = item.mjImages.indexOf(specificUrl);
                 if (idx >= 0 && item.mjThumbnails[idx]) {
                     return item.mjThumbnails[idx];
@@ -3003,8 +3242,42 @@ function TapnowApp() {
         const cacheUrl = localCacheServerConnected
             ? (item.localCacheUrl || (item.localCacheMap ? Object.values(item.localCacheMap)[0] : null))
             : null;
+        if (performanceMode === 'off') {
+            return cacheUrl || item.url || item.originalUrl || item.mjOriginalUrl || '';
+        }
         return cacheUrl || item.thumbnailUrl || item.url || item.originalUrl || item.mjOriginalUrl || '';
-    }, [localCacheServerConnected]);
+    }, [localCacheServerConnected, performanceMode]);
+
+    const rebuildHistoryThumbnail = useCallback(async (item) => {
+        if (!item) return;
+        const rawUrls = item.mjImages && item.mjImages.length > 0
+            ? item.mjImages
+            : [item.url || item.originalUrl || item.mjOriginalUrl].filter(Boolean);
+        if (rawUrls.length === 0) {
+            showToast('没有可用的图片地址', 'warning');
+            return;
+        }
+        const quality = performanceMode === 'ultra' ? 'ultra' : 'normal';
+        rawUrls.forEach(url => {
+            if (url) thumbnailCacheRef.current.delete(url);
+            const resolved = resolveHistoryUrl(item, url);
+            if (resolved) thumbnailCacheRef.current.delete(resolved);
+        });
+
+        if (rawUrls.length > 1) {
+            const mjThumbnails = await Promise.all(rawUrls.map(async (url) => {
+                const resolved = resolveHistoryUrl(item, url);
+                if (!resolved) return null;
+                return await generateThumbnail(resolved, quality);
+            }));
+            setHistory(prev => prev.map(h => h.id === item.id ? { ...h, mjThumbnails } : h));
+        } else {
+            const resolved = resolveHistoryUrl(item, rawUrls[0]);
+            const thumbnail = resolved ? await generateThumbnail(resolved, quality) : null;
+            setHistory(prev => prev.map(h => h.id === item.id ? { ...h, thumbnailUrl: thumbnail || null } : h));
+        }
+        showToast('缩略图已更新', 'success');
+    }, [generateThumbnail, performanceMode, resolveHistoryUrl, showToast]);
 
     const pickLocalCachePath = useCallback((fieldKey, patchKey) => {
         const input = document.createElement('input');
@@ -3416,7 +3689,7 @@ function TapnowApp() {
                     const newIdx = prev <= 0 ? history.length - 1 : prev - 1;
                     // 自动打开预览
                     const targetItem = history[newIdx];
-                    const displayUrl = resolveHistoryPreviewUrl(targetItem);
+                    const displayUrl = resolveHistoryUrl(targetItem);
                     if (displayUrl) {
                         setLightboxItem({
                             ...targetItem,
@@ -3433,7 +3706,7 @@ function TapnowApp() {
                     const newIdx = prev >= history.length - 1 ? 0 : prev + 1;
                     // 自动打开预览
                     const targetItem = history[newIdx];
-                    const displayUrl = resolveHistoryPreviewUrl(targetItem);
+                    const displayUrl = resolveHistoryUrl(targetItem);
                     if (displayUrl) {
                         setLightboxItem({
                             ...targetItem,
@@ -3452,7 +3725,7 @@ function TapnowApp() {
 
         window.addEventListener('keydown', handleHistoryKeyDown);
         return () => window.removeEventListener('keydown', handleHistoryKeyDown);
-    }, [historyOpen, history, lightboxItem, resolveHistoryPreviewUrl]);
+    }, [historyOpen, history, lightboxItem, resolveHistoryUrl]);
 
     // localStorage 写入防抖函数
     const debouncedSaveHistory = useMemo(() => debounce((historyToSave) => {
@@ -13937,6 +14210,151 @@ ${inputText.substring(0, 15000)} ... (截断)
         }
     };
 
+    const buildStoryboardDownloadItems = (node, scope = 'all') => {
+        const mode = node.settings?.mode || 'video';
+        const shots = node.settings?.shots || [];
+        const projectTitle = node.settings?.projectTitle || '未命名分镜';
+        const projectSlug = sanitizeCacheId(projectTitle) || '未命名分镜';
+        const items = [];
+
+        const getShotLabel = (shot) => {
+            const raw = (shot.description || shot.prompt || '').trim();
+            return sanitizeCacheId(raw) || '未命名镜头';
+        };
+
+        const pushImageItem = (shot, shotIndex, imageUrl, imageIndex) => {
+            if (!imageUrl) return;
+            const ext = imageUrl.startsWith('data:') ? (getDataUrlExt(imageUrl, '.png') || '.png') : (getUrlExt(imageUrl, '.png') || '.png');
+            const shotLabel = getShotLabel(shot);
+            const filename = `${projectSlug}-${shotLabel}-${shotIndex}-${imageIndex}${ext}`;
+            items.push({ url: imageUrl, filename });
+        };
+
+        const pushVideoItem = (shot, shotIndex, videoUrl) => {
+            if (!videoUrl) return;
+            const ext = videoUrl.startsWith('data:') ? (getDataUrlExt(videoUrl, '.mp4') || '.mp4') : (getUrlExt(videoUrl, '.mp4') || '.mp4');
+            const shotLabel = getShotLabel(shot);
+            const filename = `${projectSlug}-${shotLabel}-${shotIndex}${ext}`;
+            items.push({ url: videoUrl, filename });
+        };
+
+        const hasLockedShot = scope !== 'all' && shots.some(s => s.outputEnabled);
+
+        shots.forEach((shot, idx) => {
+            const shotIndex = shot.scene_index || idx + 1;
+
+            if (mode === 'image') {
+                const outputImages = shot.output_images?.length ? shot.output_images : (shot.output_url ? [shot.output_url] : []);
+                if (outputImages.length === 0) return;
+
+                if (scope === 'all') {
+                    outputImages.forEach((url, imageIdx) => pushImageItem(shot, shotIndex, url, imageIdx + 1));
+                    return;
+                }
+
+                const selectedIndex = Number.isInteger(shot.selectedImageIndex) ? shot.selectedImageIndex : -1;
+                const isLocked = !!shot.outputEnabled;
+
+                if (hasLockedShot) {
+                    if (!isLocked) return;
+                    if (selectedIndex >= 0 && outputImages[selectedIndex]) {
+                        pushImageItem(shot, shotIndex, outputImages[selectedIndex], selectedIndex + 1);
+                        return;
+                    }
+                    outputImages.forEach((url, imageIdx) => pushImageItem(shot, shotIndex, url, imageIdx + 1));
+                    return;
+                }
+
+                if (selectedIndex >= 0 && outputImages[selectedIndex]) {
+                    pushImageItem(shot, shotIndex, outputImages[selectedIndex], selectedIndex + 1);
+                }
+            } else {
+                const videoUrl = shot.video_url || shot.output_url;
+                if (!videoUrl) return;
+
+                if (scope === 'all') {
+                    pushVideoItem(shot, shotIndex, videoUrl);
+                    return;
+                }
+
+                if (shot.outputEnabled) {
+                    pushVideoItem(shot, shotIndex, videoUrl);
+                }
+            }
+        });
+
+        return items;
+    };
+
+    const handleStoryboardBatchDownload = async (node, scope = 'all') => {
+        const items = buildStoryboardDownloadItems(node, scope);
+        if (!items.length) {
+            alert('没有可下载的资源');
+            return;
+        }
+
+        const now = new Date();
+        const timestamp = `${now.getFullYear().toString().slice(2)}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}-${String(now.getHours()).padStart(2, '0')}${String(now.getMinutes()).padStart(2, '0')}`;
+        const projectTitle = node.settings?.projectTitle || '未命名分镜';
+        const zipName = `${sanitizeCacheId(projectTitle) || '未命名分镜'}-batch-${timestamp}.zip`;
+
+        const toBlob = async (url) => {
+            if (url.startsWith('data:')) {
+                const parts = url.split(',');
+                const mime = parts[0].match(/:(.*?);/i)?.[1] || 'application/octet-stream';
+                const bstr = atob(parts[1] || '');
+                const u8arr = new Uint8Array(bstr.length);
+                for (let i = 0; i < bstr.length; i++) u8arr[i] = bstr.charCodeAt(i);
+                return new Blob([u8arr], { type: mime });
+            }
+            const resp = await fetch(url);
+            if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+            return await resp.blob();
+        };
+
+        if (items.length === 1) {
+            try {
+                setDownloadProgress({ active: true, current: 0, total: 1 });
+                const blob = await toBlob(items[0].url);
+                const a = document.createElement('a');
+                a.href = URL.createObjectURL(blob);
+                a.download = items[0].filename;
+                a.click();
+                URL.revokeObjectURL(a.href);
+                setDownloadProgress({ active: false, current: 1, total: 1 });
+            } catch (e) {
+                setDownloadProgress({ active: false, current: 0, total: 0 });
+                alert('下载失败: ' + e.message);
+            }
+            return;
+        }
+
+        const zip = new JSZip();
+        setDownloadProgress({ active: true, current: 0, total: items.length });
+        let added = 0;
+
+        for (const item of items) {
+            try {
+                const blob = await toBlob(item.url);
+                zip.file(item.filename, blob);
+                added += 1;
+            } catch (e) {
+                console.error('下载资源失败:', item.filename, e);
+            }
+            setDownloadProgress(prev => ({ ...prev, current: prev.current + 1 }));
+        }
+
+        if (added === 0) {
+            setDownloadProgress({ active: false, current: 0, total: 0 });
+            alert('没有可下载的有效资源');
+            return;
+        }
+
+        const content = await zip.generateAsync({ type: 'blob' });
+        saveAs(content, zipName);
+        setDownloadProgress({ active: false, current: 0, total: 0 });
+    };
+
 
     const handlePreviewRightClick = (e, item) => {
         if (!item?.url) return;
@@ -16271,7 +16689,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                         />
                                     )}
                                     {/* MaskEditor 组件 */}
-                                    {node.isMasking && !isVideoUrl(node.content) && node.dimensions && (
+                                    {node.isMasking && !isVideoUrl(node.content) && (
                                         <MaskEditor
                                             nodeId={node.id}
                                             imageUrl={node.content}
@@ -17293,21 +17711,69 @@ ${inputText.substring(0, 15000)} ... (截断)
                             e.preventDefault();
                             e.stopPropagation();
 
+                            const currentShot = (node.settings?.shots || []).find(s => s.id === shotId);
+                            const currentMode = node.settings?.mode || 'video';
+                            const applyDroppedImage = (imageUrl) => {
+                                if (!imageUrl) return false;
+                                if (currentMode === 'video') {
+                                    const useLastFrame = currentShot?.useFirstLastFrame && currentShot?.activeInput === 'last';
+                                    const field = useLastFrame ? 'lastFrame' : 'image_url';
+                                    updateShot(node.id, shotId, { [field]: imageUrl, image_filename: '' });
+                                    return true;
+                                }
+                                if (currentShot?.useMultiRef) {
+                                    const existingRefs = currentShot.referenceImages && currentShot.referenceImages.length > 0
+                                        ? currentShot.referenceImages
+                                        : (currentShot.image_url ? [currentShot.image_url] : []);
+                                    const nextRefs = existingRefs.slice(0, 5);
+                                    if (nextRefs.length < 5) {
+                                        nextRefs.push(imageUrl);
+                                    } else {
+                                        nextRefs[0] = imageUrl;
+                                    }
+                                    updateShot(node.id, shotId, { referenceImages: nextRefs, image_url: nextRefs[0] || imageUrl });
+                                    return true;
+                                }
+                                updateShot(node.id, shotId, { image_url: imageUrl, image_filename: '', referenceImages: [] });
+                                return true;
+                            };
+
                             // 1. 尝试从浏览器外部拖入文件
                             if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
                                 const file = e.dataTransfer.files[0];
                                 if (file.type.startsWith('image/')) {
                                     const reader = new FileReader();
-                                    reader.onload = (ev) => updateShot(node.id, shotId, { image_url: ev.target.result });
+                                    reader.onload = (ev) => applyDroppedImage(ev.target.result);
                                     reader.readAsDataURL(file);
                                     return;
                                 }
                             }
 
-                            // 2. 尝试从左侧历史记录拖入 (需要配合你在 Sidebar 设置的 dataTransfer)
-                            // 这里假设历史记录拖拽时没有传递复杂数据，通常较难直接拦截 React 组件间的拖拽
-                            // 建议使用上面的"本地上传"或"粘贴"作为主要交互
+                            // 2. 尝试从左侧历史记录拖入 (dataTransfer)
+                            const rawPayload = e.dataTransfer.getData('application/x-tapnow-history');
+                            if (rawPayload) {
+                                try {
+                                    const payload = JSON.parse(rawPayload);
+                                    const dragUrl = payload?.url || payload?.originalUrl || payload?.previewUrl || '';
+                                    if (applyDroppedImage(dragUrl)) return;
+                                } catch (err) {
+                                    console.warn('[StoryboardDrop] Failed to parse payload', err);
+                                }
+                            }
+
+                            // 3. 尝试读取 URL 文本 (浏览器内拖拽图片/链接)
+                            const uriList = e.dataTransfer.getData('text/uri-list') || '';
+                            const uriCandidate = uriList.split('\n').find(line => line && !line.startsWith('#')) || '';
+                            const plainText = e.dataTransfer.getData('text/plain') || '';
+                            const urlCandidate = (uriCandidate || plainText).trim();
+                            if (urlCandidate && /^(https?:|data:image\/|blob:|file:)/i.test(urlCandidate)) {
+                                applyDroppedImage(urlCandidate);
+                            }
                         };
+
+                        const previewPanelWidth = 220;
+                        const nodeQueueItems = batchQueueItems.filter(item => item.nodeId === node.id);
+                        const nodeRunningItems = batchRunningItems.filter(item => item.nodeId === node.id);
 
                         return (
                             <div className="flex h-full">
@@ -17318,7 +17784,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                     onMouseLeave={() => setIsMouseOverStoryboard(false)}
                                 >
                                     {/* Header */}
-                                    <div className={`px-4 py-3 border-b flex justify-between items-center shrink-0 flex-nowrap overflow-x-auto no-scrollbar ${theme === 'dark' ? 'bg-zinc-900 border-zinc-800' : 'bg-zinc-50 border-zinc-200'
+                                    <div className={`px-4 py-3 border-b flex items-center shrink-0 flex-nowrap overflow-x-auto no-scrollbar ${theme === 'dark' ? 'bg-zinc-900 border-zinc-800' : 'bg-zinc-50 border-zinc-200'
                                         }`}>
                                         <div className="flex items-center gap-1 shrink-0">
                                             <LayoutGrid size={16} className="text-purple-500" />
@@ -17422,7 +17888,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                 </button>
                                             </div>
                                         </div>
-                                        <div className="flex items-center gap-2 relative z-10 shrink-0">
+                                        <div className="flex items-center gap-2 ml-auto relative z-10 shrink-0">
                                             {/* V3.5.26: Clear Button Moved Here */}
                                             <button
                                                 onClick={(e) => {
@@ -17675,16 +18141,49 @@ ${inputText.substring(0, 15000)} ... (截断)
 
                                                         // Confirm before re-roll
                                                         if (isReroll) {
-                                                            const confirmMsg = `所有镜头已生成完毕。\n\n即将对 ${targetShots.length} 个未锁定（灰框未勾选）的镜头进行重新生成。\n\n● 继续生成会覆盖原有输出\n● 已锁定（灰框勾选）的镜头将保持不变\n\n是否继续？`;
+                                                            const confirmMsg = `所有镜头已生成完毕。\n\n即将对 ${targetShots.length} 个未锁定（灰框未勾选）的镜头进行重新生成。\n\n● 继续批量生成会覆盖原有输出但是资产在左侧可以查看\n● 已锁定（灰框勾选）的镜头将保持不变\n\n是否继续？`;
                                                             if (!confirm(confirmMsg)) return;
                                                         }
 
+                                                        // V3.8: 记录批次分组与任务编号
+                                                        const totalCount = targetShots.length;
+                                                        const batchConcurrencyValue = batchConcurrency === 0 ? totalCount : Math.max(1, batchConcurrency);
+                                                        const taskIndex = (batchTaskCounterRef.current.get(node.id) || 0) + 1;
+                                                        batchTaskCounterRef.current.set(node.id, taskIndex);
+                                                        const batchId = `batch-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+                                                        const shotIds = targetShots.map(s => s.id);
+                                                        shotIds.forEach((shotId, idx) => {
+                                                            shotBatchMapRef.current.set(`${node.id}:${shotId}`, {
+                                                                batchId,
+                                                                batchOrder: idx,
+                                                                taskIndex
+                                                            });
+                                                        });
+                                                        setBatchGroups(prev => [
+                                                            ...prev,
+                                                            {
+                                                                id: batchId,
+                                                                nodeId: node.id,
+                                                                projectTitle: node.settings?.projectTitle || '未命名分镜',
+                                                                total: totalCount,
+                                                                concurrency: batchConcurrencyValue,
+                                                                createdAt: Date.now(),
+                                                                mode,
+                                                                taskIndex,
+                                                                shotIds
+                                                            }
+                                                        ]);
+
                                                         // V3.7.5: 统一图片和视频模式的队列管理
-                                                        const newQueueItems = targetShots.map(s => ({
+                                                        const newQueueItems = targetShots.map((s, idx) => ({
                                                             nodeId: node.id,
                                                             shotId: s.id,
                                                             retryCount: 0,
-                                                            mode: mode
+                                                            mode: mode,
+                                                            batchId,
+                                                            batchOrder: idx,
+                                                            batchConcurrency: batchConcurrencyValue,
+                                                            taskIndex
                                                         }));
                                                         setBatchQueue(prev => [...prev, ...newQueueItems]);
 
@@ -17707,41 +18206,219 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                         <span className="text-[10px] font-medium whitespace-nowrap">批量</span>
                                                     </div>
                                                 </button>
-                                                {/* V3.6.1: 批量下载按钮 */}
-                                                <button
-                                                    onClick={async () => {
-                                                        const mode = node.settings?.mode || 'video';
-                                                        const shots = (node.settings?.shots || []).filter(s =>
-                                                            mode === 'image' ? s.output_url : s.video_url
-                                                        );
-                                                        if (shots.length === 0) {
-                                                            alert(`没有可下载的${mode === 'image' ? '图片' : '视频'}`);
-                                                            return;
-                                                        }
-                                                        const projectTitle = node.settings?.projectTitle || '分镜';
-                                                        for (let i = 0; i < shots.length; i++) {
-                                                            const shot = shots[i];
-                                                            const url = mode === 'image' ? shot.output_url : shot.video_url;
-                                                            const ext = mode === 'image' ? 'png' : 'mp4';
-                                                            const filename = `${projectTitle}_${i + 1}.${ext}`;
-                                                            try {
-                                                                const res = await fetch(url);
-                                                                const blob = await res.blob();
-                                                                const a = document.createElement('a');
-                                                                a.href = URL.createObjectURL(blob);
-                                                                a.download = filename;
-                                                                a.click();
-                                                                URL.revokeObjectURL(a.href);
-                                                            } catch (e) { console.error('Download failed:', e); }
-                                                            await new Promise(r => setTimeout(r, 300));
-                                                        }
-                                                    }}
-                                                    className={`p-1 rounded transition-colors ${theme === 'dark' ? 'bg-zinc-700 hover:bg-zinc-600 text-zinc-300' : 'bg-zinc-200 hover:bg-zinc-300 text-zinc-600'}`}
-                                                    title="批量下载"
-                                                    onMouseDown={(e) => e.stopPropagation()}
-                                                >
-                                                    <Download size={12} />
-                                                </button>
+                                                {/* V3.8: 批量下载按钮（全部/选中） */}
+                                                <div className="relative">
+                                                    <button
+                                                        onClick={(e) => {
+                                                            e.stopPropagation();
+                                                            const rect = e.currentTarget.getBoundingClientRect();
+                                                            setActiveDropdown(activeDropdown?.nodeId === node.id && activeDropdown.type === 'storyboard-download'
+                                                                ? null
+                                                                : {
+                                                                    nodeId: node.id,
+                                                                    type: 'storyboard-download',
+                                                                    anchor: {
+                                                                        top: rect.top,
+                                                                        left: rect.left,
+                                                                        right: rect.right,
+                                                                        bottom: rect.bottom,
+                                                                        width: rect.width,
+                                                                        height: rect.height
+                                                                    }
+                                                                });
+                                                        }}
+                                                        className={`p-1 rounded transition-colors flex items-center gap-0.5 ${theme === 'dark' ? 'bg-zinc-700 hover:bg-zinc-600 text-zinc-300' : 'bg-zinc-200 hover:bg-zinc-300 text-zinc-600'}`}
+                                                        title="批量下载"
+                                                        onMouseDown={(e) => e.stopPropagation()}
+                                                    >
+                                                        <Download size={12} />
+                                                        <ChevronDown size={10} />
+                                                    </button>
+                                                    {activeDropdown?.nodeId === node.id && activeDropdown.type === 'storyboard-download' && activeDropdown.anchor && createPortal(
+                                                        <div
+                                                            className={`fixed mt-1 w-32 rounded-lg shadow-xl py-1 z-[9999] border ${theme === 'dark'
+                                                                ? 'bg-[#18181b] border-zinc-700'
+                                                                : 'bg-white border-zinc-200'
+                                                                }`}
+                                                            style={{
+                                                                top: activeDropdown.anchor.bottom + 6,
+                                                                left: activeDropdown.anchor.right,
+                                                                transform: 'translateX(-100%)'
+                                                            }}
+                                                            onMouseLeave={() => setActiveDropdown(null)}
+                                                            onMouseDown={(e) => e.stopPropagation()}
+                                                        >
+                                                            <button
+                                                                onClick={() => {
+                                                                    setActiveDropdown(null);
+                                                                    handleStoryboardBatchDownload(node, 'all');
+                                                                }}
+                                                                className={`w-full text-left px-3 py-2 text-xs transition-colors ${theme === 'dark'
+                                                                    ? 'text-zinc-300 hover:bg-zinc-800'
+                                                                    : 'text-zinc-700 hover:bg-zinc-100'
+                                                                    }`}
+                                                            >
+                                                                全部下载
+                                                            </button>
+                                                            <button
+                                                                onClick={() => {
+                                                                    setActiveDropdown(null);
+                                                                    handleStoryboardBatchDownload(node, 'selected');
+                                                                }}
+                                                                className={`w-full text-left px-3 py-2 text-xs transition-colors ${theme === 'dark'
+                                                                    ? 'text-zinc-300 hover:bg-zinc-800'
+                                                                    : 'text-zinc-700 hover:bg-zinc-100'
+                                                                    }`}
+                                                            >
+                                                                选中下载
+                                                            </button>
+                                                        </div>,
+                                                        document.body
+                                                    )}
+                                                </div>
+                                                {/* V3.8: 批量队列可视化 */}
+                                                <div className="relative">
+                                                    <button
+                                                        onClick={(e) => {
+                                                            e.stopPropagation();
+                                                            const rect = e.currentTarget.getBoundingClientRect();
+                                                            setActiveDropdown(activeDropdown?.nodeId === node.id && activeDropdown.type === 'batch-queue'
+                                                                ? null
+                                                                : {
+                                                                    nodeId: node.id,
+                                                                    type: 'batch-queue',
+                                                                    anchor: {
+                                                                        top: rect.top,
+                                                                        left: rect.left,
+                                                                        right: rect.right,
+                                                                        bottom: rect.bottom,
+                                                                        width: rect.width,
+                                                                        height: rect.height
+                                                                    }
+                                                                });
+                                                        }}
+                                                        className={`p-1 rounded transition-colors relative ${theme === 'dark'
+                                                            ? 'bg-zinc-700 hover:bg-zinc-600 text-zinc-300'
+                                                            : 'bg-zinc-200 hover:bg-zinc-300 text-zinc-600'}`}
+                                                        title={`队列：运行 ${nodeRunningItems.length} | 排队 ${nodeQueueItems.length}`}
+                                                        onMouseDown={(e) => e.stopPropagation()}
+                                                    >
+                                                        <Layers size={12} />
+                                                        {nodeQueueItems.length > 0 && (
+                                                            <span className={`absolute -top-1 -right-1 text-[8px] px-1 rounded-full ${theme === 'dark'
+                                                                ? 'bg-blue-500 text-white'
+                                                                : 'bg-blue-600 text-white'}`}>
+                                                                {nodeQueueItems.length}
+                                                            </span>
+                                                        )}
+                                                    </button>
+                                                    {activeDropdown?.nodeId === node.id && activeDropdown.type === 'batch-queue' && activeDropdown.anchor && createPortal(
+                                                        <div
+                                                            className={`fixed mt-1 w-64 rounded-lg shadow-xl py-2 z-[9999] border ${theme === 'dark'
+                                                                ? 'bg-[#18181b] border-zinc-700'
+                                                                : 'bg-white border-zinc-200'
+                                                                }`}
+                                                            style={{
+                                                                top: activeDropdown.anchor.bottom + 6,
+                                                                left: activeDropdown.anchor.right,
+                                                                transform: 'translateX(-100%)'
+                                                            }}
+                                                            onMouseLeave={() => setActiveDropdown(null)}
+                                                            onMouseDown={(e) => e.stopPropagation()}
+                                                        >
+                                                            <div className={`px-3 pb-2 text-[10px] ${theme === 'dark' ? 'text-zinc-400' : 'text-zinc-500'}`}>
+                                                                运行 {nodeRunningItems.length} · 排队 {nodeQueueItems.length}
+                                                            </div>
+                                                            <div className="px-3 pb-2 flex gap-2">
+                                                                <button
+                                                                    onClick={() => {
+                                                                        setActiveDropdown(null);
+                                                                        if (nodeQueueItems.length === 0) return;
+                                                                        if (confirm('确定清空排队任务吗？')) clearNodeQueue(node.id, false);
+                                                                    }}
+                                                                    className={`text-[10px] px-2 py-1 rounded ${theme === 'dark'
+                                                                        ? 'bg-zinc-800 text-zinc-300 hover:bg-zinc-700'
+                                                                        : 'bg-zinc-100 text-zinc-600 hover:bg-zinc-200'}`}
+                                                                >
+                                                                    清空排队
+                                                                </button>
+                                                                <button
+                                                                    onClick={() => {
+                                                                        setActiveDropdown(null);
+                                                                        if (nodeRunningItems.length === 0 && nodeQueueItems.length === 0) return;
+                                                                        if (confirm('确定终止当前节点所有生成并清空队列吗？')) clearNodeQueue(node.id, true);
+                                                                    }}
+                                                                    className={`text-[10px] px-2 py-1 rounded ${theme === 'dark'
+                                                                        ? 'bg-red-900/40 text-red-300 hover:bg-red-900/60'
+                                                                        : 'bg-red-50 text-red-600 hover:bg-red-100'}`}
+                                                                >
+                                                                    终止全部
+                                                                </button>
+                                                            </div>
+                                                            {nodeRunningItems.length > 0 && (
+                                                                <div className="px-3 pb-2">
+                                                                    <div className={`text-[10px] mb-1 ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-500'}`}>运行中</div>
+                                                                    <div className="space-y-1">
+                                                                        {nodeRunningItems.slice(0, 6).map((item, idx) => (
+                                                                            <div key={`${item.nodeId}-${item.shotId}-${idx}`} className={`text-[10px] flex items-center justify-between gap-2 ${theme === 'dark' ? 'text-zinc-300' : 'text-zinc-600'}`}>
+                                                                                <span className="truncate max-w-[150px]">{item.projectTitle} · 镜头{item.sceneIndex}</span>
+                                                                                <div className="flex items-center gap-1 shrink-0">
+                                                                                    <span className="text-green-500">运行</span>
+                                                                                    <button
+                                                                                        onClick={() => {
+                                                                                            if (confirm('确定终止该生成任务吗？')) stopRunningShot(item.nodeId, item.shotId);
+                                                                                        }}
+                                                                                        className={`p-0.5 rounded ${theme === 'dark'
+                                                                                            ? 'text-zinc-500 hover:text-red-300'
+                                                                                            : 'text-zinc-400 hover:text-red-500'}`}
+                                                                                        title="终止任务"
+                                                                                    >
+                                                                                        <Trash2 size={10} />
+                                                                                    </button>
+                                                                                </div>
+                                                                            </div>
+                                                                        ))}
+                                                                        {nodeRunningItems.length > 6 && (
+                                                                            <div className={`text-[9px] ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-400'}`}>仅显示前 6 项</div>
+                                                                        )}
+                                                                    </div>
+                                                                </div>
+                                                            )}
+                                                            <div className="px-3">
+                                                                <div className={`text-[10px] mb-1 ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-500'}`}>排队中</div>
+                                                                {nodeQueueItems.length === 0 ? (
+                                                                    <div className={`text-[10px] ${theme === 'dark' ? 'text-zinc-600' : 'text-zinc-400'}`}>队列为空</div>
+                                                                ) : (
+                                                                    <div className="space-y-1 max-h-40 overflow-y-auto pr-1">
+                                                                        {nodeQueueItems.slice(0, 12).map((item) => (
+                                                                            <div key={`${item.nodeId}-${item.shotId}-${item.order}`} className={`text-[10px] flex items-center justify-between gap-2 ${theme === 'dark' ? 'text-zinc-300' : 'text-zinc-600'}`}>
+                                                                                <span className="truncate max-w-[150px]">#{item.order} {item.projectTitle} · 镜头{item.sceneIndex}</span>
+                                                                                <div className="flex items-center gap-1 shrink-0">
+                                                                                    <span className="text-blue-400">{item.mode === 'image' ? '图' : '视'}</span>
+                                                                                    <button
+                                                                                        onClick={() => {
+                                                                                            if (confirm('确定移除该排队任务吗？')) removeQueuedBatchItem(item.nodeId, item.shotId);
+                                                                                        }}
+                                                                                        className={`p-0.5 rounded ${theme === 'dark'
+                                                                                            ? 'text-zinc-500 hover:text-red-300'
+                                                                                            : 'text-zinc-400 hover:text-red-500'}`}
+                                                                                        title="移除任务"
+                                                                                    >
+                                                                                        <Trash2 size={10} />
+                                                                                    </button>
+                                                                                </div>
+                                                                            </div>
+                                                                        ))}
+                                                                        {nodeQueueItems.length > 12 && (
+                                                                            <div className={`text-[9px] ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-400'}`}>仅显示前 12 项</div>
+                                                                        )}
+                                                                    </div>
+                                                                )}
+                                                            </div>
+                                                        </div>,
+                                                        document.body
+                                                    )}
+                                                </div>
                                                 {/* V3.6.1: 预览展开按钮 */}
                                                 <button
                                                     onClick={(e) => {
@@ -17750,8 +18427,8 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                             if (n.id === node.id) {
                                                                 const isShowing = n.settings?.showOutputPreview;
                                                                 // 展开时增加宽度，收起时减少宽度
-                                                                // 默认增加 160px 用于显示预览列
-                                                                const newWidth = isShowing ? Math.max(380, n.width - 160) : n.width + 160;
+                                                                // 默认增加预览列宽度
+                                                                const newWidth = isShowing ? Math.max(380, n.width - previewPanelWidth) : n.width + previewPanelWidth;
                                                                 return {
                                                                     ...n,
                                                                     width: newWidth,
@@ -17770,10 +18447,12 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                     <ChevronRight size={12} className={`transition-transform ${node.settings?.showOutputPreview ? 'rotate-90' : ''}`} />
                                                 </button>
                                             </div>
-                                        </div>
-                                        {/* V3.7.18: 预览面板标题栏 - 独立区域，固定宽度160px居中 */}
-                                        {node.settings?.showOutputPreview && (
-                                            <div className={`w-[160px] shrink-0 flex items-center justify-center gap-2 ml-1 ${theme === 'dark' ? '' : ''}`}>
+                                            {/* V3.7.18: 预览面板标题栏 - 独立区域 */}
+                                            {node.settings?.showOutputPreview && (
+                                                <div
+                                                    className={`shrink-0 flex items-center justify-center gap-2 ml-1 ${theme === 'dark' ? '' : ''}`}
+                                                    style={{ width: previewPanelWidth }}
+                                                >
                                                 {(node.settings?.mode || 'video') === 'image' ? (
                                                     <>
                                                         {/* 图片模式: 两个按钮 */}
@@ -17826,8 +18505,9 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                         {(node.settings?.shots || []).every(s => s.outputEnabled) ? '取消' : '全选'}
                                                     </button>
                                                 )}
-                                            </div>
-                                        )}
+                                                </div>
+                                            )}
+                                        </div>
                                     </div>
 
                                     {/* V3.5.17: Script Splitter Manual Input (Banner removed in V3.5.24) */}
@@ -18115,7 +18795,13 @@ ${inputText.substring(0, 15000)} ... (截断)
 
                                                                 {/* V3.7.4: Input Preview (Horizontal Video Split, Import Fix) */}
                                                                 {/* V3.7.5: Container width increased to support horizontal layout better */}
-                                                                <div className="flex flex-col gap-2 shrink-0 mr-2 h-full min-h-[14rem] w-52">
+                                                                <div
+                                                                    className="flex flex-col gap-2 shrink-0 mr-2 h-full min-h-[14rem] w-52"
+                                                                    onDragOver={(e) => {
+                                                                        e.preventDefault();
+                                                                    }}
+                                                                    onDrop={(e) => handleShotDrop(e, shot.id)}
+                                                                >
                                                                     {(() => {
                                                                         const mode = node.settings?.mode || 'video';
                                                                         const isVideo = mode === 'video';
@@ -18279,7 +18965,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                                                     <div className="absolute top-0 left-0 bg-black/50 text-white text-[8px] px-1 backdrop-blur-sm">{idx + 2}</div>
                                                                                                 </div>
                                                                                             ))}
-                                                                                            {inputImages.length < 4 && (
+                                                                                            {inputImages.length < 5 && (
                                                                                                 <label className={`w-12 h-14 shrink-0 rounded border border-dashed flex items-center justify-center cursor-pointer hover:bg-zinc-100 dark:hover:bg-zinc-800 ${borderColor} text-zinc-400 hover:text-blue-500 hover:border-blue-500 transition-colors`}>
                                                                                                     <Plus size={16} />
                                                                                                     <input type="file" className="hidden" accept="image/*" onChange={(e) => {
@@ -18617,23 +19303,6 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                         )}
                                                                     </div>
 
-                                                                    {/* Time Display - V3.7.33 Refined Style (Blue "Ready-made") */}
-                                                                    {(shot.status === 'generating' || shot.status === 'done' || shot.status === 'completed' || shot.status === 'failed' || shot.status === 'error') && (
-                                                                        <div
-                                                                            className={`absolute top-1 right-1 px-1.5 py-0.5 rounded text-[10px] font-mono flex items-center gap-1 backdrop-blur-[2px] z-10 ${theme === 'dark'
-                                                                                ? 'bg-blue-500/20 text-blue-400 border border-blue-500/30'
-                                                                                : 'bg-blue-50 text-blue-600 border border-blue-200'
-                                                                                }`}
-                                                                        >
-                                                                            <Clock size={10} />
-                                                                            <span>
-                                                                                {shot.status === 'generating'
-                                                                                    ? (shotTimers[`${node.id}-${shot.id}`] ? shotTimers[`${node.id}-${shot.id}`].replace('⏱️ ', '') : '0.0s')
-                                                                                    : `${(shot.durationCost || 0).toFixed(1)}s`
-                                                                                }
-                                                                            </span>
-                                                                        </div>
-                                                                    )}
                                                                     {/* 角色引用栏 (仅 Sora 模型) */}
                                                                     {(() => {
                                                                         const currentModel = shot.model || '';
@@ -18749,8 +19418,39 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                 </div>
 
                                                                 {/* Actions */}
-                                                                <div className={`flex flex-col gap-2 justify-center border-l pl-2 shrink-0 ${theme === 'dark' ? 'border-zinc-800' : 'border-zinc-200'
+                                                                <div className={`flex flex-col items-center gap-3 justify-between border-l pl-4 pr-1 shrink-0 w-14 ${theme === 'dark' ? 'border-zinc-800' : 'border-zinc-200'
                                                                     }`}>
+                                                                    <div className="flex flex-col items-center gap-2">
+                                                                        {(shot.status === 'generating' || shot.status === 'done' || shot.status === 'completed' || shot.status === 'failed' || shot.status === 'error') && (
+                                                                            <div
+                                                                                className={`px-1.5 py-0.5 rounded text-[11px] font-mono flex items-center justify-center gap-1 ${theme === 'dark'
+                                                                                    ? 'bg-blue-500/20 text-blue-400 border border-blue-500/30'
+                                                                                    : 'bg-blue-50 text-blue-600 border border-blue-200'
+                                                                                    }`}
+                                                                            >
+                                                                                <Clock size={12} />
+                                                                                <span>
+                                                                                    {shot.status === 'generating'
+                                                                                        ? (shotTimers[`${node.id}-${shot.id}`] ? shotTimers[`${node.id}-${shot.id}`].replace('⏱ ', '') : '0.0s')
+                                                                                        : `${(shot.durationCost || 0).toFixed(1)}s`
+                                                                                    }
+                                                                                </span>
+                                                                            </div>
+                                                                        )}
+                                                                        <button
+                                                                            onClick={() => {
+                                                                                if (confirm('确定要删除该镜头吗？')) deleteShot(node.id, shot.id);
+                                                                            }}
+                                                                            className={`p-1.5 transition-colors ${theme === 'dark'
+                                                                                ? 'text-zinc-600 hover:text-red-500'
+                                                                                : 'text-zinc-400 hover:text-red-600'
+                                                                                }`}
+                                                                            title="删除镜头"
+                                                                            onMouseDown={(e) => e.stopPropagation()}
+                                                                        >
+                                                                            <Trash2 size={16} />
+                                                                        </button>
+                                                                    </div>
                                                                     {/* V3.6.1: 生成按钮 - 根据模式调用不同函数 */}
                                                                     {(() => {
                                                                         const mode = node.settings?.mode || 'video';
@@ -18772,7 +19472,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                                         }
                                                                                     }
                                                                                 }}
-                                                                                className={`p-1.5 rounded text-white shadow-sm transition-all active:scale-95 ${shot.status === 'generating'
+                                                                                className={`p-3 rounded text-white shadow-sm transition-all active:scale-95 ${shot.status === 'generating'
                                                                                     ? 'bg-zinc-500 hover:bg-red-500'
                                                                                     : isDone
                                                                                         ? 'bg-blue-500 hover:bg-green-600'
@@ -18782,33 +19482,22 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                                 onMouseDown={(e) => e.stopPropagation()}
                                                                             >
                                                                                 {shot.status === 'generating' ? (
-                                                                                    <div className="relative w-3.5 h-3.5 flex items-center justify-center">
-                                                                                        <Loader2 size={14} className="animate-spin absolute" />
-                                                                                        <Square size={10} fill="currentColor" className="opacity-0 hover:opacity-100 absolute z-10 transition-opacity" />
+                                                                                    <div className="relative w-4 h-4 flex items-center justify-center">
+                                                                                        <Loader2 size={18} className="animate-spin absolute" />
+                                                                                        <Square size={14} fill="currentColor" className="opacity-0 hover:opacity-100 absolute z-10 transition-opacity" />
                                                                                     </div>
                                                                                 ) : isDone ? (
-                                                                                    <CheckCircle2 size={14} />
+                                                                                    <CheckCircle2 size={18} />
                                                                                 ) : mode === 'image' ? (
-                                                                                    <ImageIcon size={14} />
+                                                                                    <ImageIcon size={18} />
                                                                                 ) : (
-                                                                                    <Play size={14} fill="currentColor" />
+                                                                                    <Play size={18} fill="currentColor" />
                                                                                 )}
                                                                             </button>
                                                                         );
                                                                     })()}
-                                                                    <button
-                                                                        onClick={() => deleteShot(node.id, shot.id)}
-                                                                        className={`p-1.5 transition-colors ${theme === 'dark'
-                                                                            ? 'text-zinc-600 hover:text-red-500'
-                                                                            : 'text-zinc-400 hover:text-red-600'
-                                                                            }`}
-                                                                        title="删除镜头"
-                                                                        onMouseDown={(e) => e.stopPropagation()}
-                                                                    >
-                                                                        <Trash2 size={14} />
-                                                                    </button>
                                                                     {/* V3.5.17: Move up/down buttons for manual reordering */}
-                                                                    <div className="flex flex-col gap-0.5 ml-1">
+                                                                    <div className="flex flex-col items-center gap-1.5">
                                                                         <button
                                                                             onClick={() => {
                                                                                 const shots = [...(node.settings?.shots || [])];
@@ -18819,14 +19508,14 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                                 }
                                                                             }}
                                                                             disabled={idx === 0}
-                                                                            className={`p-0.5 rounded transition-colors ${idx === 0 ? 'opacity-30 cursor-not-allowed' : ''} ${theme === 'dark'
+                                                                            className={`p-1.5 rounded transition-colors ${idx === 0 ? 'opacity-30 cursor-not-allowed' : ''} ${theme === 'dark'
                                                                                 ? 'text-zinc-500 hover:text-blue-400 hover:bg-zinc-800'
                                                                                 : 'text-zinc-400 hover:text-blue-500 hover:bg-zinc-100'
                                                                                 }`}
                                                                             title="上移"
                                                                             onMouseDown={(e) => e.stopPropagation()}
                                                                         >
-                                                                            <ChevronUp size={12} />
+                                                                            <ChevronUp size={16} />
                                                                         </button>
                                                                         <button
                                                                             onClick={() => {
@@ -18838,14 +19527,14 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                                 }
                                                                             }}
                                                                             disabled={idx === (node.settings?.shots?.length || 0) - 1}
-                                                                            className={`p-0.5 rounded transition-colors ${idx === (node.settings?.shots?.length || 0) - 1 ? 'opacity-30 cursor-not-allowed' : ''} ${theme === 'dark'
+                                                                            className={`p-1.5 rounded transition-colors ${idx === (node.settings?.shots?.length || 0) - 1 ? 'opacity-30 cursor-not-allowed' : ''} ${theme === 'dark'
                                                                                 ? 'text-zinc-500 hover:text-blue-400 hover:bg-zinc-800'
                                                                                 : 'text-zinc-400 hover:text-blue-500 hover:bg-zinc-100'
                                                                                 }`}
                                                                             title="下移"
                                                                             onMouseDown={(e) => e.stopPropagation()}
                                                                         >
-                                                                            <ChevronDown size={12} />
+                                                                            <ChevronDown size={16} />
                                                                         </button>
                                                                     </div>
                                                                 </div>
@@ -18855,8 +19544,11 @@ ${inputText.substring(0, 15000)} ... (截断)
 
                                                             {/* V3.7.10: 右侧预览面板 - 4图网格 */}
                                                             {node.settings?.showOutputPreview && (
-                                                                <div className={`w-[160px] shrink-0 p-2 ml-1 flex flex-col gap-2 rounded-lg border transition-all ${theme === 'dark' ? 'bg-zinc-900/50 border-zinc-800' : 'bg-white border-zinc-200'
-                                                                    } ${shot.outputEnabled ? (theme === 'dark' ? 'bg-blue-900/20 border-blue-800' : 'bg-blue-50 border-blue-300') : ''}`}>
+                                                                <div
+                                                                    className={`shrink-0 p-2 ml-1 flex flex-col gap-2 rounded-lg border transition-all ${theme === 'dark' ? 'bg-zinc-900/50 border-zinc-800' : 'bg-white border-zinc-200'
+                                                                        } ${shot.outputEnabled ? (theme === 'dark' ? 'bg-blue-900/20 border-blue-800' : 'bg-blue-50 border-blue-300') : ''}`}
+                                                                    style={{ width: previewPanelWidth }}
+                                                                >
                                                                     {/* Header: Checkbox + Status */}
                                                                     <div className="flex items-center justify-between">
                                                                         <div
@@ -19140,8 +19832,14 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                 );
                                             })
                                         ) : (
-                                            <div className={`flex flex-col items-center justify-center h-40 gap-3 rounded-lg border-2 border-dashed ${theme === 'dark' ? 'border-zinc-800 text-zinc-600' : 'border-zinc-300 text-zinc-400'
-                                                }`}>
+                                            <div
+                                                className={`flex flex-col items-center justify-center h-40 gap-3 rounded-lg border-2 border-dashed cursor-pointer transition-colors ${theme === 'dark'
+                                                    ? 'border-zinc-800 text-zinc-600 hover:border-zinc-700'
+                                                    : 'border-zinc-300 text-zinc-400 hover:border-blue-300 hover:text-blue-500'
+                                                    }`}
+                                                onClick={() => addEmptyShot(node.id)}
+                                                onMouseDown={(e) => e.stopPropagation()}
+                                            >
                                                 <LayoutGrid size={32} className="opacity-50" />
                                                 <span className="text-xs">暂无分镜，请添加或同步分析结果</span>
                                             </div>
@@ -20443,12 +21141,13 @@ ${inputText.substring(0, 15000)} ... (截断)
                                 className={`p-3 border-b flex justify-between items-center ${theme === 'dark' ? 'border-zinc-800' : 'border-zinc-200'
                                     }`}
                             >
-                                <div className="flex items-center gap-2">
+                                <div className="flex flex-col gap-1">
                                     <h3
-                                        className={`font-bold text-xs ${theme === 'dark' ? 'text-zinc-300' : 'text-zinc-700'
+                                        className={`font-bold text-xs leading-tight ${theme === 'dark' ? 'text-zinc-300' : 'text-zinc-700'
                                             }`}
                                     >
-                                        生成历史
+                                        <span className="block">生成</span>
+                                        <span className="block">历史</span>
                                     </h3>
                                     {/* V3.4.12: 下载进度条 */}
                                     {downloadProgress.active && (
@@ -20465,7 +21164,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                         </div>
                                     )}
                                 </div>
-                                <div className="flex items-center gap-2">
+                                <div className="flex items-center gap-1">
                                     <button
                                         onClick={() => {
                                             const modes = ['off', 'normal', 'ultra'];
@@ -20506,6 +21205,20 @@ ${inputText.substring(0, 15000)} ... (截断)
                                         title="本地缓存设置"
                                     >
                                         <FolderOpen size={14} />
+                                    </button>
+                                    <button
+                                        onClick={() => setHistoryQueuePanelOpen(prev => !prev)}
+                                        className={`p-1.5 rounded transition-colors ${historyQueuePanelOpen
+                                            ? theme === 'dark'
+                                                ? 'text-blue-400 bg-blue-500/20 hover:bg-blue-500/30'
+                                                : 'text-blue-600 bg-blue-100 hover:bg-blue-200'
+                                            : theme === 'dark'
+                                                ? 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800'
+                                                : 'text-zinc-500 hover:text-zinc-700 hover:bg-zinc-200'
+                                            }`}
+                                        title="全局队列"
+                                    >
+                                        <Layers size={14} />
                                     </button>
                                     {/* V3.5.8: 全选/取消全选按钮 */}
                                     <button
@@ -20636,6 +21349,213 @@ ${inputText.substring(0, 15000)} ... (截断)
                                 </div>
                             </div>
                             <div className="flex-1 overflow-y-auto custom-scrollbar p-3 space-y-3">
+                                {historyQueuePanelOpen && (
+                                    <div className={`rounded-lg border p-3 space-y-3 ${theme === 'dark' ? 'bg-zinc-900/60 border-zinc-800' : 'bg-white border-zinc-200'}`}>
+                                        <div className="flex items-center justify-between gap-2">
+                                            <span className={`text-xs font-semibold ${theme === 'dark' ? 'text-zinc-200' : 'text-zinc-700'}`}>全局队列</span>
+                                            <div className="flex items-center gap-1">
+                                                <button
+                                                    onClick={() => setBatchQueueMode('pipeline')}
+                                                    className={`text-[10px] px-2 py-1 rounded ${batchQueueMode === 'pipeline'
+                                                        ? theme === 'dark'
+                                                            ? 'bg-blue-600/30 text-blue-300'
+                                                            : 'bg-blue-100 text-blue-600'
+                                                        : theme === 'dark'
+                                                            ? 'bg-zinc-800 text-zinc-400 hover:text-zinc-200'
+                                                            : 'bg-zinc-100 text-zinc-500 hover:text-zinc-700'
+                                                        }`}
+                                                >
+                                                    管线
+                                                </button>
+                                                <button
+                                                    onClick={() => setBatchQueueMode('parallel')}
+                                                    className={`text-[10px] px-2 py-1 rounded ${batchQueueMode === 'parallel'
+                                                        ? theme === 'dark'
+                                                            ? 'bg-blue-600/30 text-blue-300'
+                                                            : 'bg-blue-100 text-blue-600'
+                                                        : theme === 'dark'
+                                                            ? 'bg-zinc-800 text-zinc-400 hover:text-zinc-200'
+                                                            : 'bg-zinc-100 text-zinc-500 hover:text-zinc-700'
+                                                        }`}
+                                                >
+                                                    并行
+                                                </button>
+                                            </div>
+                                        </div>
+                                        {(() => {
+                                            const groupMap = new Map();
+                                            batchGroups.forEach(group => {
+                                                groupMap.set(group.id, { ...group, queued: [], running: [] });
+                                            });
+
+                                            const getFallbackGroup = (item) => {
+                                                const node = nodesMap.get(item.nodeId);
+                                                const projectTitle = node?.settings?.projectTitle || '未命名分镜';
+                                                const fallbackId = item.batchId || `legacy-${item.nodeId}`;
+                                                if (!groupMap.has(fallbackId)) {
+                                                    groupMap.set(fallbackId, {
+                                                        id: fallbackId,
+                                                        nodeId: item.nodeId,
+                                                        projectTitle,
+                                                        total: 0,
+                                                        concurrency: item.batchConcurrency || 1,
+                                                        createdAt: Date.now(),
+                                                        mode: item.mode,
+                                                        taskIndex: item.taskIndex || 0,
+                                                        shotIds: []
+                                                    });
+                                                }
+                                                return groupMap.get(fallbackId);
+                                            };
+
+                                            batchQueue.forEach(item => {
+                                                const group = item.batchId && groupMap.has(item.batchId)
+                                                    ? groupMap.get(item.batchId)
+                                                    : getFallbackGroup(item);
+                                                group.queued.push(item);
+                                            });
+
+                                            batchRunningItems.forEach(item => {
+                                                const group = item.batchId && groupMap.has(item.batchId)
+                                                    ? groupMap.get(item.batchId)
+                                                    : getFallbackGroup(item);
+                                                group.running.push(item);
+                                            });
+
+                                            const queueGroups = [...groupMap.values()]
+                                                .filter(group => group.queued.length > 0 || group.running.length > 0)
+                                                .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+
+                                            const getShotLabel = (nodeId, shotId) => {
+                                                const node = nodesMap.get(nodeId);
+                                                const shot = node?.settings?.shots?.find(s => s.id === shotId);
+                                                return (shot?.description || shot?.prompt || '未命名镜头').trim();
+                                            };
+
+                                            return (
+                                                <>
+                                                    <div className={`text-[10px] ${theme === 'dark' ? 'text-zinc-400' : 'text-zinc-500'}`}>
+                                                        运行 {batchRunningItems.length} · 排队 {batchQueue.length}
+                                                    </div>
+                                                    <div className="flex gap-2">
+                                                        <button
+                                                            onClick={() => {
+                                                                if (batchQueue.length === 0) return;
+                                                                if (confirm('确定清空排队任务吗？')) clearBatchQueue(false);
+                                                            }}
+                                                            className={`text-[10px] px-2 py-1 rounded ${theme === 'dark'
+                                                                ? 'bg-zinc-800 text-zinc-300 hover:bg-zinc-700'
+                                                                : 'bg-zinc-100 text-zinc-600 hover:bg-zinc-200'}`}
+                                                        >
+                                                            清空排队
+                                                        </button>
+                                                        <button
+                                                            onClick={() => {
+                                                                if (batchRunningItems.length === 0 && batchQueue.length === 0) return;
+                                                                if (confirm('确定终止所有生成并清空队列吗？')) clearBatchQueue(true);
+                                                            }}
+                                                            className={`text-[10px] px-2 py-1 rounded ${theme === 'dark'
+                                                                ? 'bg-red-900/40 text-red-300 hover:bg-red-900/60'
+                                                                : 'bg-red-50 text-red-600 hover:bg-red-100'}`}
+                                                        >
+                                                            终止全部
+                                                        </button>
+                                                    </div>
+                                                    {queueGroups.length === 0 ? (
+                                                        <div className={`text-xs text-center py-4 ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-400'}`}>
+                                                            队列为空
+                                                        </div>
+                                                    ) : (
+                                                        <div className="space-y-3 max-h-64 overflow-y-auto custom-scrollbar pr-1">
+                                                            {queueGroups.map(group => {
+                                                                const concurrencyValue = Math.max(1, group.concurrency || 1);
+                                                                const totalCount = group.total || (group.queued.length + group.running.length);
+                                                                const totalRounds = Math.ceil(totalCount / concurrencyValue);
+                                                                const pendingRounds = Math.ceil(group.queued.length / concurrencyValue);
+                                                                const taskLabel = group.taskIndex ? `Task ${group.taskIndex}` : 'Task';
+                                                                const combined = [
+                                                                    ...group.running.map(item => ({ ...item, status: 'running' })),
+                                                                    ...group.queued.map(item => ({ ...item, status: 'queued' }))
+                                                                ].sort((a, b) => (a.batchOrder ?? 0) - (b.batchOrder ?? 0));
+
+                                                                return (
+                                                                    <div
+                                                                        key={group.id}
+                                                                        className={`rounded-lg border p-2 ${theme === 'dark'
+                                                                            ? 'border-zinc-800 bg-zinc-900/60'
+                                                                            : 'border-zinc-200 bg-zinc-50'}`}
+                                                                    >
+                                                                        <div className="flex items-start justify-between gap-2">
+                                                                            <div>
+                                                                                <div className={`text-[11px] font-semibold ${theme === 'dark' ? 'text-zinc-200' : 'text-zinc-700'}`}>
+                                                                                    NODE - {group.projectTitle} · {taskLabel}
+                                                                                </div>
+                                                                                <div className={`text-[10px] mt-0.5 ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-500'}`}>
+                                                                                    {totalCount} 总生成 · {concurrencyValue} 每批 · {totalRounds} 批次（排队 {pendingRounds} 轮）
+                                                                                </div>
+                                                                            </div>
+                                                                            {group.queued.length > 0 && (
+                                                                                <button
+                                                                                    onClick={() => {
+                                                                                        if (confirm('确定移除该任务的排队内容吗？')) removeQueuedBatchGroup(group.id);
+                                                                                    }}
+                                                                                    className={`p-1 rounded ${theme === 'dark'
+                                                                                        ? 'text-zinc-500 hover:text-red-300'
+                                                                                        : 'text-zinc-400 hover:text-red-500'}`}
+                                                                                    title="移除任务排队"
+                                                                                >
+                                                                                    <Trash2 size={12} />
+                                                                                </button>
+                                                                            )}
+                                                                        </div>
+                                                                        <div className="mt-2 space-y-1">
+                                                                            {combined.map((item, idx) => {
+                                                                                const batchIndex = Math.floor((item.batchOrder ?? 0) / concurrencyValue) + 1;
+                                                                                const shortLabel = group.taskIndex ? `T${group.taskIndex}B${batchIndex}` : `B${batchIndex}`;
+                                                                                const shotLabel = getShotLabel(item.nodeId, item.shotId);
+                                                                                const statusLabel = item.status === 'running' ? '运行' : '排队';
+                                                                                return (
+                                                                                    <div
+                                                                                        key={`${group.id}-${item.nodeId}-${item.shotId}-${idx}`}
+                                                                                        className={`text-[10px] flex items-center justify-between gap-2 ${theme === 'dark' ? 'text-zinc-300' : 'text-zinc-600'}`}
+                                                                                    >
+                                                                                        <span className="truncate">
+                                                                                            {shortLabel} · {shotLabel || `镜头${item.sceneIndex || ''}`}
+                                                                                        </span>
+                                                                                        <div className="flex items-center gap-1 shrink-0">
+                                                                                            <span className={item.status === 'running' ? 'text-green-500' : 'text-blue-400'}>
+                                                                                                {statusLabel}
+                                                                                            </span>
+                                                                                            <button
+                                                                                                onClick={() => {
+                                                                                                    if (item.status === 'running') {
+                                                                                                        if (confirm('确定终止该生成任务吗？')) stopRunningShot(item.nodeId, item.shotId);
+                                                                                                    } else {
+                                                                                                        if (confirm('确定移除该排队任务吗？')) removeQueuedBatchItem(item.nodeId, item.shotId);
+                                                                                                    }
+                                                                                                }}
+                                                                                                className={`p-0.5 rounded ${theme === 'dark'
+                                                                                                    ? 'text-zinc-500 hover:text-red-300'
+                                                                                                    : 'text-zinc-400 hover:text-red-500'}`}
+                                                                                                title={item.status === 'running' ? '终止任务' : '移除任务'}
+                                                                                            >
+                                                                                                <Trash2 size={10} />
+                                                                                            </button>
+                                                                                        </div>
+                                                                                    </div>
+                                                                                );
+                                                                            })}
+                                                                        </div>
+                                                                    </div>
+                                                                );
+                                                            })}
+                                                        </div>
+                                                    )}
+                                                </>
+                                            );
+                                        })()}
+                                    </div>
+                                )}
                                 {historyCachePanelOpen && (
                                     <div className={`rounded-lg border p-3 space-y-3 ${theme === 'dark' ? 'bg-zinc-900/60 border-zinc-800' : 'bg-white border-zinc-200'}`}>
                                         <div className="space-y-2">
@@ -20768,8 +21688,8 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                     ? item.mjImages[currentIndex]
                                                                     : null;
                                                                 const displayUrl = selectedUrl
-                                                                    ? resolveHistoryPreviewUrl(item, selectedUrl)
-                                                                    : resolveHistoryPreviewUrl(item);
+                                                                    ? resolveHistoryUrl(item, selectedUrl)
+                                                                    : resolveHistoryUrl(item);
                                                                 if (displayUrl) {
                                                                     setLightboxItem({
                                                                         ...item,
@@ -20788,7 +21708,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                         ? { ...hItem, url: imgUrl, selectedMjImageIndex: idx }
                                                                         : hItem
                                                                 ));
-                                                                const resolvedUrl = resolveHistoryPreviewUrl(item, imgUrl);
+                                                                const resolvedUrl = resolveHistoryUrl(item, imgUrl);
                                                                 const updatedItem = {
                                                                     ...item,
                                                                     url: resolvedUrl,
@@ -20799,6 +21719,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                 setLightboxItem(updatedItem);
                                                             }}
                                                             onImageContextMenu={(e, item, imgUrl, idx) => handleHistoryRightClick(e, item, imgUrl, idx)}
+                                                            onRebuildThumbnail={rebuildHistoryThumbnail}
                                                             onRefresh={(item) => {
                                                                 if (item.apiConfig) {
                                                                     setHistory(prev => prev.map(h => h.id === item.id ? { ...h, status: 'generating', errorMsg: null, progress: 5 } : h));
@@ -20849,8 +21770,8 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                     ? item.mjImages[currentIndex]
                                                                     : null;
                                                                 const displayUrl = selectedUrl
-                                                                    ? resolveHistoryPreviewUrl(item, selectedUrl)
-                                                                    : resolveHistoryPreviewUrl(item);
+                                                                    ? resolveHistoryUrl(item, selectedUrl)
+                                                                    : resolveHistoryUrl(item);
                                                                 if (displayUrl) {
                                                                     setLightboxItem({
                                                                         ...item,
@@ -20869,7 +21790,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                         ? { ...hItem, url: imgUrl, selectedMjImageIndex: idx }
                                                                         : hItem
                                                                 ));
-                                                                const resolvedUrl = resolveHistoryPreviewUrl(item, imgUrl);
+                                                                const resolvedUrl = resolveHistoryUrl(item, imgUrl);
                                                                 const updatedItem = {
                                                                     ...item,
                                                                     url: resolvedUrl,
@@ -20880,6 +21801,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                 setLightboxItem(updatedItem);
                                                             }}
                                                             onImageContextMenu={(e, item, imgUrl, idx) => handleHistoryRightClick(e, item, imgUrl, idx)}
+                                                            onRebuildThumbnail={rebuildHistoryThumbnail}
                                                             onRefresh={(item) => {
                                                                 if (item.apiConfig) {
                                                                     setHistory(prev => prev.map(h => h.id === item.id ? { ...h, status: 'generating', errorMsg: null, progress: 5 } : h));
@@ -22315,7 +23237,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                     // 确保newIndex在有效范围内
                                     const validIndex = Math.max(0, Math.min(newIndex, currentItem.mjImages.length - 1));
                                     const selectedUrl = currentItem.mjImages[validIndex];
-                                    const resolvedUrl = resolveHistoryPreviewUrl(currentItem, selectedUrl);
+                                    const resolvedUrl = resolveHistoryUrl(currentItem, selectedUrl);
 
                                     // V3.7.22: 只有历史记录项（有 id 字段且无 storyboardContext）才更新历史记录
                                     if (currentItem.id && !currentItem.storyboardContext) {
@@ -22394,8 +23316,8 @@ ${inputText.substring(0, 15000)} ... (截断)
                                             ? candidate.mjImages[imgIndex]
                                             : candidate.url;
                                         const resolvedUrl = selectedUrl
-                                            ? resolveHistoryPreviewUrl(candidate, selectedUrl)
-                                            : resolveHistoryPreviewUrl(candidate);
+                                            ? resolveHistoryUrl(candidate, selectedUrl)
+                                            : resolveHistoryUrl(candidate);
                                         setLightboxItem({
                                             ...candidate,
                                             url: resolvedUrl,
