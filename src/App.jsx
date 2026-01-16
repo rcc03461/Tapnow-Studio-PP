@@ -1201,6 +1201,7 @@ const DEFAULT_API_CONFIGS = [
     { id: 'MJ V6', provider: 'midjourney', type: 'Image' },
     { id: 'flux-kontext-pro', provider: 'flux', type: 'Image' },
     { id: 'gpt-4o-image', provider: 'openai', type: 'Image' },
+    { id: 'gemini-3-pro-image-preview', provider: 'google', type: 'Image' },
     { id: 'jimeng-4.5', provider: 'jimeng', type: 'Image' },
     { id: 'jimeng-4.1', provider: 'jimeng', type: 'Image' },
     { id: 'jimeng-4.0', provider: 'jimeng', type: 'Image' },
@@ -8158,6 +8159,8 @@ function TapnowApp() {
                 const isNanoBanana2 = (config?.modelName ?? '').includes('nano-banana-2') || modelId.includes('nano-banana-2');
                 const isMidjourney = modelId.includes('mj') || (config?.provider ?? '').toLowerCase().includes('midjourney');
                 const isJimeng = modelId.includes('jimeng') || (config?.modelName ?? '').includes('jimeng') || config?.provider === 'jimeng';
+                // V3.7.36: Gemini 图像生成（使用聊天 API 格式）
+                const isGeminiImage = modelId.includes('gemini') && modelId.includes('image') || (config?.provider === 'google' && config?.type === 'Image');
 
                 // 辅助函数
                 const getJimengModelName = () => {
@@ -8246,6 +8249,21 @@ function TapnowApp() {
                         const b64s = await Promise.all(b64Promises);
                         jsonBody.image = b64s.map(b => `data:image/png;base64,${b}`);
                     }
+                    payload = jsonBody;
+                }
+                // 3.5. Gemini Image (V3.7.36: 使用聊天 API 格式)
+                else if (isGeminiImage) {
+                    // Gemini 图像生成使用聊天端点，而不是图像端点
+                    endpoint = `${baseUrl}/v1/chat/completions`;
+                    const jsonBody = {
+                        model: config?.id || modelId,
+                        messages: [
+                            {
+                                role: 'user',
+                                content: prompt || '生成一张图片'
+                            }
+                        ]
+                    };
                     payload = jsonBody;
                 }
                 // 4. [关键] Nano Banana 2 (V2.5-4 核心逻辑，包含异步处理)
@@ -8722,7 +8740,14 @@ function TapnowApp() {
 
                 // 处理同步返回结果 (标准 OpenAI 格式或嵌套格式)
                 let imageUrls = [];
-                if (data?.data && Array.isArray(data.data)) {
+
+                // V3.7.36: Gemini 特殊响应格式处理
+                if (isGeminiImage && data?.choices?.[0]?.message?.images) {
+                    // Gemini 返回格式: choices[0].message.images[{type: "image_url", image_url: {url: "data:image/jpeg;base64,..."}}]
+                    imageUrls = data.choices[0].message.images
+                        .map(img => img?.image_url?.url)
+                        .filter(url => url && typeof url === 'string');
+                } else if (data?.data && Array.isArray(data.data)) {
                     // 标准 OpenAI 格式
                     imageUrls = data.data.map(item => item.url || item.image_url || item).filter(url => typeof url === 'string');
                 } else if (data?.data?.data && Array.isArray(data.data.data)) {

@@ -7,3 +7,6 @@ dist/
 thumbs.db
 Tapnow Studio-V*.html
 !Tapnow Studio-V3.7.34.html
+.spec-workflow/*
+todo/*
+CLAUDE.md
