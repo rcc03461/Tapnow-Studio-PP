@@ -705,7 +705,7 @@ const HistoryItem = memo(({
                     <span className={`line-clamp-2 ${theme === 'dark' ? 'text-zinc-300' : 'text-zinc-700'}`}>
                         {item.prompt || 'Untitled'}
                     </span>
-                    <div className="flex items-center gap-1 shrink-0 ml-1">
+                    <div className={`shrink-0 ml-1 ${item.type === 'image' ? 'flex flex-col items-center gap-1' : 'flex items-center gap-1'}`}>
                         {item.type === 'video' && (item.status === 'generating' || item.status === 'failed') && (
                             <button
                                 onClick={(e) => {
@@ -721,6 +721,16 @@ const HistoryItem = memo(({
                                 <RefreshCw size={12} />
                             </button>
                         )}
+                        <button
+                            onClick={(e) => { e.stopPropagation(); onDelete && onDelete(item.id); }}
+                            className={`shrink-0 p-0.5 ${theme === 'dark'
+                                ? 'text-zinc-500 hover:text-red-500'
+                                : 'text-zinc-400 hover:text-red-500'
+                                }`}
+                            title="删除"
+                        >
+                            <Trash2 size={12} />
+                        </button>
                         {item.type === 'image' && (
                             <button
                                 onClick={(e) => {
@@ -736,16 +746,6 @@ const HistoryItem = memo(({
                                 <RefreshCw size={12} />
                             </button>
                         )}
-                        <button
-                            onClick={(e) => { e.stopPropagation(); onDelete && onDelete(item.id); }}
-                            className={`shrink-0 p-0.5 ${theme === 'dark'
-                                ? 'text-zinc-500 hover:text-red-500'
-                                : 'text-zinc-400 hover:text-red-500'
-                                }`}
-                            title="删除"
-                        >
-                            <Trash2 size={12} />
-                        </button>
                     </div>
                 </div>
 
@@ -790,7 +790,17 @@ const HistoryItem = memo(({
 
                     {/* 第四行 - 时间·模型·用时 */}
                     <span className={theme === 'dark' ? 'text-zinc-500' : 'text-zinc-400'}>
-                        {item.time} · <span title={item.provider}>{item.modelName}</span>
+                        {item.time} · <span title={(() => {
+                            const fallback = item.apiConfig?.modelId || item.apiConfig?.model || item.model || item.modelName || '未知模型';
+                            if (item.modelName && item.provider && item.modelName.toLowerCase() === item.provider.toLowerCase()) return fallback;
+                            return item.modelName || fallback;
+                        })()}>
+                            {(() => {
+                                const fallback = item.apiConfig?.modelId || item.apiConfig?.model || item.model || item.modelName || '未知模型';
+                                if (item.modelName && item.provider && item.modelName.toLowerCase() === item.provider.toLowerCase()) return fallback;
+                                return item.modelName || fallback;
+                            })()}
+                        </span>
                         {typeof item.durationMs === 'number' && item.durationMs > 0 && (
                             <> · 用时 {(item.durationMs / 1000).toFixed(1)}s</>
                         )}
@@ -1284,7 +1294,6 @@ const DEFAULT_API_CONFIGS = [
     { id: 'MJ V6', provider: 'midjourney', type: 'Image' },
     { id: 'flux-kontext-pro', provider: 'flux', type: 'Image' },
     { id: 'gpt-4o-image', provider: 'openai', type: 'Image' },
-    { id: 'gemini-3-pro-image-preview', provider: 'google', type: 'Image' },
     { id: 'jimeng-4.5', provider: 'jimeng', type: 'Image' },
     { id: 'jimeng-4.1', provider: 'jimeng', type: 'Image' },
     { id: 'jimeng-4.0', provider: 'jimeng', type: 'Image' },
@@ -2838,6 +2847,30 @@ function TapnowApp() {
     const [contextMenuExpanded, setContextMenuExpanded] = useState(false);
     const [selectionContextMenu, setSelectionContextMenu] = useState({ visible: false, x: 0, y: 0 });
     const [historyContextMenu, setHistoryContextMenu] = useState({ visible: false, x: 0, y: 0, worldX: 0, worldY: 0, item: null });
+    const [historySendMenuOpen, setHistorySendMenuOpen] = useState(false);
+    const [isChatInputFocused, setIsChatInputFocused] = useState(false);
+    const [isChatHovered, setIsChatHovered] = useState(false);
+    const lastInteractionRef = useRef({ target: null, at: 0 });
+    const markInteraction = useCallback((target) => {
+        lastInteractionRef.current = { target, at: Date.now() };
+    }, []);
+    const historySendMenuCloseTimerRef = useRef(null);
+    const openHistorySendMenu = useCallback(() => {
+        if (historySendMenuCloseTimerRef.current) {
+            clearTimeout(historySendMenuCloseTimerRef.current);
+            historySendMenuCloseTimerRef.current = null;
+        }
+        setHistorySendMenuOpen(true);
+    }, []);
+    const scheduleHistorySendMenuClose = useCallback(() => {
+        if (historySendMenuCloseTimerRef.current) {
+            clearTimeout(historySendMenuCloseTimerRef.current);
+        }
+        historySendMenuCloseTimerRef.current = setTimeout(() => {
+            setHistorySendMenuOpen(false);
+            historySendMenuCloseTimerRef.current = null;
+        }, 1000);
+    }, []);
     // 记录当前选中的分镜格，用于接收历史记录图片
     const [activeShot, setActiveShot] = useState({ nodeId: null, shotId: null });
     const [frameContextMenu, setFrameContextMenu] = useState({ visible: false, x: 0, y: 0, nodeId: null, frame: null });
@@ -3248,7 +3281,7 @@ function TapnowApp() {
         return cacheUrl || item.thumbnailUrl || item.url || item.originalUrl || item.mjOriginalUrl || '';
     }, [localCacheServerConnected, performanceMode]);
 
-    const rebuildHistoryThumbnail = useCallback(async (item) => {
+    const rebuildHistoryThumbnail = useCallback(async (item, options = {}) => {
         if (!item) return;
         const rawUrls = item.mjImages && item.mjImages.length > 0
             ? item.mjImages
@@ -3276,8 +3309,28 @@ function TapnowApp() {
             const thumbnail = resolved ? await generateThumbnail(resolved, quality) : null;
             setHistory(prev => prev.map(h => h.id === item.id ? { ...h, thumbnailUrl: thumbnail || null } : h));
         }
-        showToast('缩略图已更新', 'success');
+        if (!options.silent) {
+            showToast('缩略图已更新', 'success');
+        }
     }, [generateThumbnail, performanceMode, resolveHistoryUrl, showToast]);
+
+    const rebuildAllHistoryThumbnails = useCallback(async () => {
+        const imageItems = history.filter(item =>
+            item.type === 'image' && (
+                (item.mjImages && item.mjImages.length > 0) ||
+                item.url || item.originalUrl || item.mjOriginalUrl
+            )
+        );
+        if (imageItems.length === 0) {
+            showToast('没有可重建的图片', 'warning');
+            return;
+        }
+        showToast(`开始重建 ${imageItems.length} 张缩略图`, 'success');
+        for (const item of imageItems) {
+            await rebuildHistoryThumbnail(item, { silent: true });
+        }
+        showToast('历史缩略图已全部重建', 'success');
+    }, [history, rebuildHistoryThumbnail, showToast]);
 
     const pickLocalCachePath = useCallback((fieldKey, patchKey) => {
         const input = document.createElement('input');
@@ -3569,6 +3622,7 @@ function TapnowApp() {
     const canvasRef = useRef(null);
     const lastMousePos = useRef({ x: 0, y: 0 });
     const chatEndRef = useRef(null);
+    const chatInputRef = useRef(null);
     const nodesRef = useRef(nodes);
     const selectedNodeIdRef = useRef(selectedNodeId);
     const selectedNodeIdsRef = useRef(selectedNodeIds); // 存储多选节点ID的ref
@@ -5674,9 +5728,9 @@ function TapnowApp() {
         }
     };
 
-    const handleChatFileUpload = (e) => {
-        const files = Array.from(e.target.files);
-        files.forEach(file => {
+    const appendChatFiles = useCallback((files) => {
+        const fileList = Array.from(files || []);
+        fileList.forEach(file => {
             const reader = new FileReader();
             reader.onload = (ev) => {
                 const content = ev.target.result;
@@ -5720,6 +5774,10 @@ function TapnowApp() {
                 reader.readAsDataURL(file);
             }
         });
+    }, [setChatFiles]);
+
+    const handleChatFileUpload = (e) => {
+        appendChatFiles(e.target.files);
         e.target.value = '';
     };
 
@@ -6532,9 +6590,71 @@ function TapnowApp() {
         });
     }, []);
 
-    const handleDrop = (nodeId, e) => {
-        e.preventDefault(); e.stopPropagation();
+    const normalizeHistoryVideoUrl = (url, type) => {
+        if (!url) return '';
+        if (type === 'video' && !isVideoUrl(url)) {
+            return url + (url.includes('?') ? '&' : '?') + 'force_video_display=true';
+        }
+        return url;
+    };
+
+    const getHistoryDragPayload = (e) => {
+        const rawPayload = e.dataTransfer.getData('application/x-tapnow-history');
+        if (!rawPayload) return null;
+        try {
+            return JSON.parse(rawPayload);
+        } catch (err) {
+            console.warn('[Drag] Failed to parse history payload', err);
+            return null;
+        }
+    };
+
+    const getDragUrlCandidate = (e) => {
+        const uriList = e.dataTransfer.getData('text/uri-list') || '';
+        const uriCandidate = uriList.split('\n').find(line => line && !line.startsWith('#')) || '';
+        const plainText = e.dataTransfer.getData('text/plain') || '';
+        const urlCandidate = (uriCandidate || plainText).trim();
+        if (!urlCandidate) return '';
+        if (/^(https?:|data:image\/|data:video\/|blob:|file:)/i.test(urlCandidate)) return urlCandidate;
+        return '';
+    };
+
+    const handleDrop = async (nodeId, e) => {
+        e.preventDefault();
+        e.stopPropagation();
         e.currentTarget.classList.remove('drag-over');
+
+        const payload = getHistoryDragPayload(e);
+        if (payload) {
+            const dragUrl = normalizeHistoryVideoUrl(payload.url || payload.originalUrl || payload.mjOriginalUrl || '', payload.type);
+            if (dragUrl) {
+                const isVideo = payload.type === 'video' || isVideoUrl(dragUrl);
+                let dimensions = null;
+                if (!isVideo) {
+                    try { dimensions = await getImageDimensions(dragUrl); } catch { }
+                }
+                saveToUndoStack();
+                setNodes((prev) => prev.map((n) => n.id === nodeId
+                    ? { ...n, content: dragUrl, dimensions: isVideo ? null : dimensions }
+                    : n));
+                return;
+            }
+        }
+
+        const dragUrlCandidate = getDragUrlCandidate(e);
+        if (dragUrlCandidate) {
+            const isVideo = isVideoUrl(dragUrlCandidate);
+            let dimensions = null;
+            if (!isVideo) {
+                try { dimensions = await getImageDimensions(dragUrlCandidate); } catch { }
+            }
+            saveToUndoStack();
+            setNodes((prev) => prev.map((n) => n.id === nodeId
+                ? { ...n, content: dragUrlCandidate, dimensions: isVideo ? null : dimensions }
+                : n));
+            return;
+        }
+
         const files = Array.from(e.dataTransfer.files);
         const imageFiles = files.filter(file => file.type.startsWith('image/'));
         if (imageFiles.length > 0) {
@@ -6588,6 +6708,134 @@ function TapnowApp() {
 
     const handleDragOver = (e) => { e.preventDefault(); e.stopPropagation(); e.currentTarget.classList.add('drag-over'); };
     const handleDragLeave = (e) => { e.preventDefault(); e.stopPropagation(); e.currentTarget.classList.remove('drag-over'); };
+
+    const handlePreviewDrop = (nodeId, e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const payload = getHistoryDragPayload(e);
+        let dragUrl = '';
+        let previewImages = null;
+        let previewType = 'image';
+
+        if (payload) {
+            dragUrl = normalizeHistoryVideoUrl(payload.url || payload.originalUrl || payload.mjOriginalUrl || '', payload.type);
+            if (payload.mjImages && payload.mjImages.length > 1) {
+                previewImages = payload.mjImages;
+                const selectedIndex = payload.selectedIndex ?? 0;
+                dragUrl = payload.mjImages[selectedIndex] || payload.mjImages[0] || dragUrl;
+            }
+            if (payload.type === 'video' || isVideoUrl(dragUrl)) previewType = 'video';
+        }
+
+        if (!dragUrl) {
+            const candidate = getDragUrlCandidate(e);
+            if (candidate) {
+                dragUrl = candidate;
+                previewType = isVideoUrl(candidate) ? 'video' : 'image';
+            }
+        }
+
+        if (!dragUrl) return;
+
+        setNodes(prev => prev.map(n =>
+            n.id === nodeId
+                ? { ...n, content: dragUrl, previewType, previewMjImages: previewImages }
+                : n
+        ));
+    };
+
+    const handleCanvasDragOver = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+    };
+
+    const handleCanvasDrop = async (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        if (e.currentTarget.id !== 'canvas-bg') return;
+
+        const payload = getHistoryDragPayload(e);
+        let dragUrl = '';
+        let isVideo = false;
+        if (payload) {
+            dragUrl = normalizeHistoryVideoUrl(payload.url || payload.originalUrl || payload.mjOriginalUrl || '', payload.type);
+            isVideo = payload.type === 'video' || isVideoUrl(dragUrl);
+        }
+        if (!dragUrl) {
+            const candidate = getDragUrlCandidate(e);
+            if (candidate) {
+                dragUrl = candidate;
+                isVideo = isVideoUrl(candidate);
+            }
+        }
+        if (!dragUrl) return;
+
+        const world = screenToWorld(e.clientX, e.clientY);
+        if (isVideo) {
+            addNode('video-input', world.x, world.y, null, dragUrl);
+            return;
+        }
+
+        let dims = undefined;
+        try {
+            const real = await getImageDimensions(dragUrl);
+            if (real?.w && real?.h) dims = { w: real.w, h: real.h };
+        } catch { }
+        addNode('input-image', world.x, world.y, null, dragUrl, dims);
+    };
+
+    const handleChatDrop = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+
+        const payload = getHistoryDragPayload(e);
+        if (payload) {
+            const resolvedUrl = normalizeHistoryVideoUrl(resolveHistoryUrl(payload, payload.url || payload.originalUrl || payload.mjOriginalUrl || null), payload.type);
+            if (resolvedUrl) {
+                const isVideo = payload.type === 'video' || isVideoUrl(resolvedUrl);
+                const isImage = !isVideo;
+                const fileExt = isImage ? 'png' : 'mp4';
+                const mimeType = isImage ? 'image/png' : 'video/mp4';
+                setChatFiles(prev => [...prev, {
+                    name: `Generated-${payload.itemId || Date.now()}.${fileExt}`,
+                    type: mimeType,
+                    content: resolvedUrl,
+                    isImage,
+                    isVideo,
+                    isAudio: false,
+                    fromHistory: true,
+                    fileExt
+                }]);
+                setIsChatOpen(true);
+            }
+            return;
+        }
+
+        const candidate = getDragUrlCandidate(e);
+        if (candidate) {
+            const isVideo = isVideoUrl(candidate);
+            const isImage = !isVideo;
+            const fileExt = isImage ? 'png' : 'mp4';
+            const mimeType = isImage ? 'image/png' : 'video/mp4';
+            setChatFiles(prev => [...prev, {
+                name: `Dropped-${Date.now()}.${fileExt}`,
+                type: mimeType,
+                content: candidate,
+                isImage,
+                isVideo,
+                isAudio: false,
+                fromHistory: false,
+                fileExt
+            }]);
+            setIsChatOpen(true);
+            return;
+        }
+
+        if (e.dataTransfer?.files?.length) {
+            appendChatFiles(e.dataTransfer.files);
+            setIsChatOpen(true);
+        }
+    };
 
     // 将HTML表格转换为Markdown表格格式
     const convertTableToMarkdown = (table) => {
@@ -8356,8 +8604,8 @@ function TapnowApp() {
             const config = apiConfigsMap.get(modelId);
             // 如果是 jimeng 模型，直接返回 modelId (如 jimeng-4.5, jimeng-video-3.0)
             if (modelId.includes('jimeng')) return modelId;
-            // 其他模型优先使用 displayName
-            return config?.displayName || credentials.provider || modelId;
+            // 其他模型优先使用 displayName，再回退到 modelName/id
+            return config?.displayName || config?.modelName || config?.id || modelId;
         };
 
         const now = Date.now();
@@ -8432,8 +8680,6 @@ function TapnowApp() {
                 const isNanoBanana2 = (config?.modelName ?? '').includes('nano-banana-2') || modelId.includes('nano-banana-2');
                 const isMidjourney = modelId.includes('mj') || (config?.provider ?? '').toLowerCase().includes('midjourney');
                 const isJimeng = modelId.includes('jimeng') || (config?.modelName ?? '').includes('jimeng') || config?.provider === 'jimeng';
-                // V3.7.36: Gemini 图像生成（使用聊天 API 格式）
-                const isGeminiImage = modelId.includes('gemini') && modelId.includes('image') || (config?.provider === 'google' && config?.type === 'Image');
 
                 // 辅助函数
                 const getJimengModelName = () => {
@@ -8522,21 +8768,6 @@ function TapnowApp() {
                         const b64s = await Promise.all(b64Promises);
                         jsonBody.image = b64s.map(b => `data:image/png;base64,${b}`);
                     }
-                    payload = jsonBody;
-                }
-                // 3.5. Gemini Image (V3.7.36: 使用聊天 API 格式)
-                else if (isGeminiImage) {
-                    // Gemini 图像生成使用聊天端点，而不是图像端点
-                    endpoint = `${baseUrl}/v1/chat/completions`;
-                    const jsonBody = {
-                        model: config?.id || modelId,
-                        messages: [
-                            {
-                                role: 'user',
-                                content: prompt || '生成一张图片'
-                            }
-                        ]
-                    };
                     payload = jsonBody;
                 }
                 // 4. [关键] Nano Banana 2 (V2.5-4 核心逻辑，包含异步处理)
@@ -9013,14 +9244,7 @@ function TapnowApp() {
 
                 // 处理同步返回结果 (标准 OpenAI 格式或嵌套格式)
                 let imageUrls = [];
-
-                // V3.7.36: Gemini 特殊响应格式处理
-                if (isGeminiImage && data?.choices?.[0]?.message?.images) {
-                    // Gemini 返回格式: choices[0].message.images[{type: "image_url", image_url: {url: "data:image/jpeg;base64,..."}}]
-                    imageUrls = data.choices[0].message.images
-                        .map(img => img?.image_url?.url)
-                        .filter(url => url && typeof url === 'string');
-                } else if (data?.data && Array.isArray(data.data)) {
+                if (data?.data && Array.isArray(data.data)) {
                     // 标准 OpenAI 格式
                     imageUrls = data.data.map(item => item.url || item.image_url || item).filter(url => typeof url === 'string');
                 } else if (data?.data?.data && Array.isArray(data.data.data)) {
@@ -13274,9 +13498,80 @@ ${inputText.substring(0, 15000)} ... (截断)
 
 
 
-    const handleVideoDrop = (nodeId, e) => {
-        e.preventDefault(); e.stopPropagation();
+    const insertKeyframesFromUrls = useCallback((nodeId, urls, insertIdx = null) => {
+        const existingNode = nodesMap.get(nodeId);
+        if (!existingNode) return;
+        const existingFrames = existingNode?.frames || [];
+        const existingKeyframes = existingNode?.selectedKeyframes || [];
+        const validUrls = (urls || []).filter(Boolean);
+        if (validUrls.length === 0) return;
+
+        const newKeyframes = validUrls.map((url, idx) => ({
+            time: Date.now() + idx,
+            url,
+            filename: ''
+        }));
+
+        const targetIndex = insertIdx !== null ? insertIdx : existingFrames.length;
+        const updatedFrames = [
+            ...existingFrames.slice(0, targetIndex),
+            ...newKeyframes,
+            ...existingFrames.slice(targetIndex)
+        ];
+        const framesToSelect = new Set([...existingKeyframes, ...newKeyframes]);
+        const normalizedFrames = updatedFrames.map((f, i) => ({ ...f, time: i }));
+        const newSelectedKeyframes = normalizedFrames.filter((_, i) => framesToSelect.has(updatedFrames[i]));
+
+        setNodes(prev => prev.map(n =>
+            n.id === nodeId
+                ? { ...n, frames: normalizedFrames, selectedKeyframes: newSelectedKeyframes }
+                : n
+        ));
+    }, [nodesMap, setNodes]);
+
+    const handleVideoDrop = async (nodeId, e) => {
+        e.preventDefault();
+        e.stopPropagation();
         e.currentTarget.classList.remove('drag-over');
+
+        const payload = getHistoryDragPayload(e);
+        if (payload) {
+            const dragUrl = normalizeHistoryVideoUrl(payload.url || payload.originalUrl || payload.mjOriginalUrl || '', payload.type);
+            if (dragUrl) {
+                const isVideo = payload.type === 'video' || isVideoUrl(dragUrl);
+                if (isVideo) {
+                    let videoMeta = { duration: 0, w: 0, h: 0 };
+                    try { videoMeta = await getVideoMetadata(dragUrl); } catch { }
+                    saveToUndoStack();
+                    setNodes(prev => prev.map(n =>
+                        n.id === nodeId
+                            ? { ...n, content: dragUrl, videoMeta, frames: [], selectedKeyframes: [], extractingFrames: false, videoFileName: '' }
+                            : n
+                    ));
+                } else {
+                    insertKeyframesFromUrls(nodeId, [dragUrl]);
+                }
+                return;
+            }
+        }
+
+        const dragUrlCandidate = getDragUrlCandidate(e);
+        if (dragUrlCandidate) {
+            if (isVideoUrl(dragUrlCandidate)) {
+                let videoMeta = { duration: 0, w: 0, h: 0 };
+                try { videoMeta = await getVideoMetadata(dragUrlCandidate); } catch { }
+                saveToUndoStack();
+                setNodes(prev => prev.map(n =>
+                    n.id === nodeId
+                        ? { ...n, content: dragUrlCandidate, videoMeta, frames: [], selectedKeyframes: [], extractingFrames: false, videoFileName: '' }
+                        : n
+                ));
+            } else {
+                insertKeyframesFromUrls(nodeId, [dragUrlCandidate]);
+            }
+            return;
+        }
+
         const files = Array.from(e.dataTransfer.files);
 
         // V3.5.17: Handle video files
@@ -13292,7 +13587,6 @@ ${inputText.substring(0, 15000)} ... (截断)
         imageFiles.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }));
 
         if (imageFiles.length > 0) {
-
             // Get existing data from node
             const existingNode = nodesMap.get(nodeId);
             const existingFrames = existingNode?.frames || [];
@@ -13362,9 +13656,8 @@ ${inputText.substring(0, 15000)} ... (截断)
     };
 
     const handleKeyframeListDrop = (nodeId, e) => {
-        e.preventDefault(); e.stopPropagation();
-        const files = Array.from(e.dataTransfer.files).filter(f => f.type.startsWith('image/'));
-        if (files.length === 0) return;
+        e.preventDefault();
+        e.stopPropagation();
 
         // Calculate insertion index
         let insertIdx = (dragInsertNodeId === nodeId && dragInsertIndex !== null)
@@ -13375,9 +13668,26 @@ ${inputText.substring(0, 15000)} ... (截断)
         setDragInsertNodeId(null);
         setDragInsertIndex(null);
 
+        const payload = getHistoryDragPayload(e);
+        if (payload) {
+            const dragUrl = payload.url || payload.originalUrl || payload.mjOriginalUrl || '';
+            if (dragUrl && !(payload.type === 'video' || isVideoUrl(dragUrl))) {
+                insertKeyframesFromUrls(nodeId, [dragUrl], insertIdx);
+            }
+            return;
+        }
+
+        const dragUrlCandidate = getDragUrlCandidate(e);
+        if (dragUrlCandidate && !isVideoUrl(dragUrlCandidate)) {
+            insertKeyframesFromUrls(nodeId, [dragUrlCandidate], insertIdx);
+            return;
+        }
+
+        const files = Array.from(e.dataTransfer.files).filter(f => f.type.startsWith('image/'));
+        if (files.length === 0) return;
+
         // Sort files by name
         files.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }));
-
 
         const existingNode = nodesMap.get(nodeId);
         const existingFrames = existingNode?.frames || [];
@@ -13966,6 +14276,7 @@ ${inputText.substring(0, 15000)} ... (截断)
 
         const world = screenToWorld(e.clientX, e.clientY);
         setHistoryContextMenu({ visible: true, x: e.clientX, y: e.clientY, worldX: world.x, worldY: world.y, item: menuItem });
+        setHistorySendMenuOpen(false);
     };
 
     const applyHistoryToSelectedNode = () => {
@@ -13982,9 +14293,222 @@ ${inputText.substring(0, 15000)} ... (截断)
         setHistoryContextMenu({ visible: false, x: 0, y: 0, item: null });
     };
 
+    const applyHistoryToActiveShot = (item) => {
+        if (!activeShot.nodeId || !activeShot.shotId) return false;
+        const imageUrl = resolveHistoryUrl(item);
+        if (!imageUrl) return false;
+        if (item.type === 'video' || isVideoUrl(imageUrl)) {
+            showToast('当前分镜仅支持图片参考', 'warning');
+            return false;
+        }
+        updateShot(activeShot.nodeId, activeShot.shotId, { image_url: imageUrl, image_filename: '' });
+        return true;
+    };
+
+    const getDefaultNodeSize = useCallback((type) => {
+        if (type === 'video-input') return { w: 580, h: 460 };
+        if (type === 'input-image') return { w: 260, h: 260 };
+        return { w: 260, h: 260 };
+    }, []);
+
+    const createLinkedInputNode = useCallback(async (targetNode, url, isVideo) => {
+        if (!targetNode || !url) return false;
+        const nodeType = isVideo ? 'video-input' : 'input-image';
+        const size = getDefaultNodeSize(nodeType);
+        const gap = 40;
+        const worldX = targetNode.x - gap - size.w / 2;
+        const worldY = targetNode.y + (targetNode.height / 2);
+
+        let dims = undefined;
+        if (!isVideo) {
+            try { dims = await getImageDimensions(url); } catch { }
+        }
+
+        const newNode = addNode(nodeType, worldX, worldY, null, url, dims, targetNode.id);
+
+        if (isVideo && newNode?.id) {
+            try {
+                const videoMeta = await getVideoMetadata(url);
+                setNodes(prev => prev.map(n =>
+                    n.id === newNode.id
+                        ? { ...n, content: url, videoMeta, frames: [], selectedKeyframes: [], extractingFrames: false, videoFileName: '' }
+                        : n
+                ));
+            } catch { }
+        }
+
+        return true;
+    }, [addNode, getDefaultNodeSize, setNodes]);
+
+    const applyHistoryToNode = async (targetNode, item) => {
+        if (!targetNode) return false;
+        const resolvedUrl = normalizeHistoryVideoUrl(resolveHistoryUrl(item), item.type);
+        if (!resolvedUrl) return false;
+
+        if (targetNode.type === 'preview') {
+            const previewImages = item.mjImages && item.mjImages.length > 1 ? item.mjImages : null;
+            const selectedIndex = item.selectedMjImageIndex ?? 0;
+            const previewUrl = previewImages ? (previewImages[selectedIndex] || previewImages[0]) : resolvedUrl;
+            setNodes(prev => prev.map(n =>
+                n.id === targetNode.id
+                    ? { ...n, content: previewUrl, previewType: item.type === 'video' || isVideoUrl(previewUrl) ? 'video' : 'image', previewMjImages: previewImages }
+                    : n
+            ));
+            return true;
+        }
+
+        if (targetNode.type === 'input-image') {
+            let dimensions = null;
+            if (!isVideoUrl(resolvedUrl)) {
+                try { dimensions = await getImageDimensions(resolvedUrl); } catch { }
+            }
+            setNodes(prev => prev.map(n =>
+                n.id === targetNode.id
+                    ? { ...n, content: resolvedUrl, dimensions: isVideoUrl(resolvedUrl) ? null : dimensions }
+                    : n
+            ));
+            return true;
+        }
+
+        if (targetNode.type === 'video-input') {
+            if (item.type === 'video' || isVideoUrl(resolvedUrl)) {
+                let videoMeta = { duration: 0, w: 0, h: 0 };
+                try { videoMeta = await getVideoMetadata(resolvedUrl); } catch { }
+                setNodes(prev => prev.map(n =>
+                    n.id === targetNode.id
+                        ? { ...n, content: resolvedUrl, videoMeta, frames: [], selectedKeyframes: [], extractingFrames: false, videoFileName: '' }
+                        : n
+                ));
+                return true;
+            }
+            insertKeyframesFromUrls(targetNode.id, [resolvedUrl]);
+            return true;
+        }
+
+        if (targetNode.type === 'video-analyze') {
+            const isVideo = item.type === 'video' || isVideoUrl(resolvedUrl);
+            return await createLinkedInputNode(targetNode, resolvedUrl, isVideo);
+        }
+
+        if (targetNode.type === 'gen-image' || targetNode.type === 'gen-video' || targetNode.type === 'image-compare') {
+            const isVideo = item.type === 'video' || isVideoUrl(resolvedUrl);
+            if (isVideo && targetNode.type === 'gen-image') {
+                showToast('AI 绘图仅支持图片输入', 'warning');
+                return false;
+            }
+            if (isVideo && targetNode.type === 'image-compare') {
+                showToast('图像对比仅支持图片输入', 'warning');
+                return false;
+            }
+            return await createLinkedInputNode(targetNode, resolvedUrl, isVideo);
+        }
+
+        return false;
+    };
+
+    const handleVideoAnalyzeDrop = async (nodeId, e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const targetNode = nodesMap.get(nodeId);
+        if (!targetNode) return;
+
+        const payload = getHistoryDragPayload(e);
+        if (payload) {
+            const dragUrl = normalizeHistoryVideoUrl(payload.url || payload.originalUrl || payload.mjOriginalUrl || '', payload.type);
+            if (dragUrl) {
+                const isVideo = payload.type === 'video' || isVideoUrl(dragUrl);
+                await createLinkedInputNode(targetNode, dragUrl, isVideo);
+            }
+            return;
+        }
+
+        const candidate = getDragUrlCandidate(e);
+        if (candidate) {
+            await createLinkedInputNode(targetNode, candidate, isVideoUrl(candidate));
+            return;
+        }
+
+        const files = Array.from(e.dataTransfer.files || []);
+        const videoFile = files.find(file => file.type.startsWith('video/'));
+        if (videoFile) {
+            const size = getDefaultNodeSize('video-input');
+            const gap = 40;
+            const worldX = targetNode.x - gap - size.w / 2;
+            const worldY = targetNode.y + (targetNode.height / 2);
+            const newNode = addNode('video-input', worldX, worldY, null, undefined, undefined, targetNode.id);
+            if (newNode?.id) {
+                handleVideoFileUpload(newNode.id, videoFile);
+            }
+            return;
+        }
+
+        const imageFile = files.find(file => file.type.startsWith('image/'));
+        if (imageFile) {
+            const reader = new FileReader();
+            reader.onload = async (ev) => {
+                const content = ev.target.result;
+                if (content) {
+                    await createLinkedInputNode(targetNode, content, false);
+                }
+            };
+            reader.readAsDataURL(imageFile);
+        }
+    };
+
+    const handleGenNodeDrop = async (nodeId, e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const targetNode = nodesMap.get(nodeId);
+        if (!targetNode) return;
+
+        const payload = getHistoryDragPayload(e);
+        if (payload) {
+            const dragUrl = normalizeHistoryVideoUrl(payload.url || payload.originalUrl || payload.mjOriginalUrl || '', payload.type);
+            if (dragUrl) {
+                const isVideo = payload.type === 'video' || isVideoUrl(dragUrl);
+                if (isVideo && (targetNode.type === 'gen-image' || targetNode.type === 'image-compare' || targetNode.type === 'gen-video')) {
+                    showToast('当前节点仅支持图片参考', 'warning');
+                    return;
+                }
+                await createLinkedInputNode(targetNode, dragUrl, false);
+            }
+            return;
+        }
+
+        const candidate = getDragUrlCandidate(e);
+        if (candidate) {
+            const isVideo = isVideoUrl(candidate);
+            if (isVideo && (targetNode.type === 'gen-image' || targetNode.type === 'image-compare' || targetNode.type === 'gen-video')) {
+                showToast('当前节点仅支持图片参考', 'warning');
+                return;
+            }
+            await createLinkedInputNode(targetNode, candidate, false);
+            return;
+        }
+
+        const files = Array.from(e.dataTransfer.files || []);
+        const imageFile = files.find(file => file.type.startsWith('image/'));
+        if (imageFile) {
+            const reader = new FileReader();
+            reader.onload = async (ev) => {
+                const content = ev.target.result;
+                if (content) {
+                    await createLinkedInputNode(targetNode, content, false);
+                }
+            };
+            reader.readAsDataURL(imageFile);
+            return;
+        }
+
+        const videoFile = files.find(file => file.type.startsWith('video/'));
+        if (videoFile) {
+            showToast('当前节点仅支持图片参考', 'warning');
+        }
+    };
+
     const sendHistoryToCanvas = async () => {
         const item = historyContextMenu.item;
-        const resolvedUrl = resolveHistoryUrl(item);
+        const resolvedUrl = resolveHistoryUrl(item, item?.url || item?.originalUrl || item?.mjOriginalUrl || null);
         if (!resolvedUrl) return;
 
         // Fix: Mark video content so input-image node knows to display it properly
@@ -14034,11 +14558,12 @@ ${inputText.substring(0, 15000)} ... (截断)
 
         addNode('input-image', targetX, targetY, null, content, dims);
         setHistoryContextMenu({ visible: false, x: 0, y: 0, item: null });
+        setHistorySendMenuOpen(false);
     };
 
     const sendHistoryToChat = () => {
         const item = historyContextMenu.item;
-        const resolvedUrl = item?.url || item?.localCacheUrl || item?.originalUrl || item?.mjOriginalUrl;
+        const resolvedUrl = resolveHistoryUrl(item, item?.url || item?.originalUrl || item?.mjOriginalUrl || null);
         if (!item || !resolvedUrl) return;
 
         // 确保正确识别图片和视频类型
@@ -14061,6 +14586,93 @@ ${inputText.substring(0, 15000)} ... (截断)
         setChatFiles(prev => [...prev, newFile]);
         setIsChatOpen(true);
         setHistoryContextMenu({ visible: false, x: 0, y: 0, item: null });
+        setHistorySendMenuOpen(false);
+    };
+
+    const sendHistoryToPreview = () => {
+        const item = historyContextMenu.item;
+        const resolvedUrl = resolveHistoryUrl(item, item?.url || item?.originalUrl || item?.mjOriginalUrl || null);
+        if (!resolvedUrl) return;
+        const previewImages = item?.mjImages && item.mjImages.length > 1 ? item.mjImages : null;
+        const selectedIndex = item?.selectedMjImageIndex ?? 0;
+        const previewUrl = previewImages ? (previewImages[selectedIndex] || previewImages[0] || resolvedUrl) : resolvedUrl;
+        setNodes(prev => {
+            const previews = prev.filter(n => n.type === 'preview');
+            if (!previews.length) return prev;
+            const selectedId = selectedNodeIdRef.current;
+            const selectedIds = selectedNodeIdsRef.current;
+            let targetId = null;
+            if (selectedId) {
+                const selectedPreview = previews.find(p => p.id === selectedId);
+                if (selectedPreview) targetId = selectedPreview.id;
+            }
+            if (!targetId && selectedIds && selectedIds.size > 0) {
+                const selectedPreview = previews.find(p => selectedIds.has(p.id));
+                if (selectedPreview) targetId = selectedPreview.id;
+            }
+            if (!targetId) targetId = previews[previews.length - 1].id;
+
+            return prev.map(n =>
+                n.id === targetId
+                    ? {
+                        ...n,
+                        content: previewUrl,
+                        previewType: item.type === 'video' || isVideoUrl(previewUrl) ? 'video' : 'image',
+                        previewMjImages: previewImages
+                    }
+                    : n
+            );
+        });
+        setHistoryContextMenu({ visible: false, x: 0, y: 0, item: null });
+        setHistorySendMenuOpen(false);
+    };
+
+    const sendHistorySmart = async () => {
+        const item = historyContextMenu.item;
+        if (!item) return;
+
+        const chatRecent = lastInteractionRef.current.target === 'chat' && (Date.now() - lastInteractionRef.current.at) < 3000;
+        if (isChatInputFocused || isChatHovered || chatRecent) {
+            sendHistoryToChat();
+            return;
+        }
+
+        const targetId = selectedNodeIdRef.current || (selectedNodeIdsRef.current && [...selectedNodeIdsRef.current][0]);
+        if (targetId) {
+            const targetNode = nodesMap.get(targetId);
+            if (targetNode) {
+                if (targetNode.type === 'storyboard-node') {
+                    if (activeShot.nodeId && activeShot.shotId) {
+                        const handled = applyHistoryToActiveShot(item);
+                        if (handled) {
+                            setHistoryContextMenu({ visible: false, x: 0, y: 0, item: null });
+                            setHistorySendMenuOpen(false);
+                            return;
+                        }
+                    }
+                    showToast('请先选中分镜中的镜头', 'warning');
+                    return;
+                }
+
+                const handled = await applyHistoryToNode(targetNode, item);
+                if (handled) {
+                    setHistoryContextMenu({ visible: false, x: 0, y: 0, item: null });
+                    setHistorySendMenuOpen(false);
+                    return;
+                }
+            }
+        }
+
+        if (activeShot.nodeId && activeShot.shotId) {
+            const handled = applyHistoryToActiveShot(item);
+            if (handled) {
+                setHistoryContextMenu({ visible: false, x: 0, y: 0, item: null });
+                setHistorySendMenuOpen(false);
+                return;
+            }
+        }
+
+        sendHistoryToCanvas();
     };
 
     // V3.5.0: 批量下载 (ZIP打包 / 单文件直接下载)
@@ -14769,6 +15381,7 @@ ${inputText.substring(0, 15000)} ... (截断)
         const isNanoBanana2 = currentModel
             ? ((currentModel.modelName || currentModel.id || '').includes('nano-banana-2'))
             : ((node.settings?.model || '').includes('nano-banana-2'));
+        const enableSmartDrop = node.type === 'gen-image' || node.type === 'gen-video' || node.type === 'image-compare';
 
         // 低细节模式：只渲染核心内容
         if (isLowDetail) {
@@ -14796,9 +15409,43 @@ ${inputText.substring(0, 15000)} ... (截断)
                         transform: 'translateZ(0)',
                         backfaceVisibility: 'hidden'
                     }}
+                    onDragOver={enableSmartDrop ? handleCanvasDragOver : undefined}
+                    onDrop={enableSmartDrop ? (e) => handleGenNodeDrop(node.id, e) : undefined}
+                    onMouseDownCapture={(e) => {
+                        if (e.button !== 0 || e.target === e.currentTarget) return;
+                        const interactive = e.target.closest('input, textarea, select, button, a, [contenteditable="true"]');
+                        if (!interactive) return;
+                        if (e.nativeEvent) e.nativeEvent.__tapnowSelectionHandled = true;
+                        if (e.ctrlKey || e.metaKey) {
+                            setSelectedNodeIds(prev => {
+                                const newSet = new Set(prev);
+                                if (newSet.has(node.id)) {
+                                    newSet.delete(node.id);
+                                } else {
+                                    newSet.add(node.id);
+                                }
+                                if (newSet.size === 1) {
+                                    setSelectedNodeId(Array.from(newSet)[0]);
+                                } else {
+                                    setSelectedNodeId(null);
+                                }
+                                return newSet;
+                            });
+                            return;
+                        }
+                        const isAlreadySelected = selectedNodeIds.has(node.id);
+                        if (isAlreadySelected && selectedNodeIds.size > 1) {
+                            setSelectedNodeId(node.id);
+                        } else {
+                            setSelectedNodeId(node.id);
+                            setSelectedNodeIds(new Set([node.id]));
+                        }
+                    }}
                     onMouseDown={(e) => {
+                        if (e.nativeEvent?.__tapnowSelectionHandled) return;
                         if (e.button === 0) {
                             e.stopPropagation();
+                            markInteraction('node');
                             if (e.ctrlKey || e.metaKey) {
                                 setSelectedNodeIds(prev => {
                                     const newSet = new Set(prev);
@@ -15021,9 +15668,43 @@ ${inputText.substring(0, 15000)} ... (截断)
                     transform: 'translateZ(0)',
                     backfaceVisibility: 'hidden'
                 }}
+                onDragOver={enableSmartDrop ? handleCanvasDragOver : undefined}
+                onDrop={enableSmartDrop ? (e) => handleGenNodeDrop(node.id, e) : undefined}
+                onMouseDownCapture={(e) => {
+                    if (e.button !== 0 || e.target === e.currentTarget) return;
+                    const interactive = e.target.closest('input, textarea, select, button, a, [contenteditable="true"]');
+                    if (!interactive) return;
+                    if (e.nativeEvent) e.nativeEvent.__tapnowSelectionHandled = true;
+                    if (e.ctrlKey || e.metaKey) {
+                        setSelectedNodeIds(prev => {
+                            const newSet = new Set(prev);
+                            if (newSet.has(node.id)) {
+                                newSet.delete(node.id);
+                            } else {
+                                newSet.add(node.id);
+                            }
+                            if (newSet.size === 1) {
+                                setSelectedNodeId(Array.from(newSet)[0]);
+                            } else {
+                                setSelectedNodeId(null);
+                            }
+                            return newSet;
+                        });
+                        return;
+                    }
+                    const isAlreadySelected = selectedNodeIds.has(node.id);
+                    if (isAlreadySelected && selectedNodeIds.size > 1) {
+                        setSelectedNodeId(node.id);
+                    } else {
+                        setSelectedNodeId(node.id);
+                        setSelectedNodeIds(new Set([node.id]));
+                    }
+                }}
                 onMouseDown={(e) => {
+                    if (e.nativeEvent?.__tapnowSelectionHandled) return;
                     if (e.button === 0) {
                         e.stopPropagation();
+                        markInteraction('node');
                         // 如果按住了Ctrl键，添加到多选
                         if (e.ctrlKey || e.metaKey) {
                             setSelectedNodeIds(prev => {
@@ -17145,6 +17826,8 @@ ${inputText.substring(0, 15000)} ... (截断)
                     {node.type === 'video-analyze' && (
                         <div
                             className={`relative w-full h-full flex flex-col transition-colors pointer-events-auto video-analyze-container ${theme === 'dark' ? 'bg-zinc-900/80' : 'bg-zinc-100'}`}
+                            onDrop={(e) => handleVideoAnalyzeDrop(node.id, e)}
+                            onDragOver={handleCanvasDragOver}
                             onClick={(e) => {
                                 // 检查是否有文本选择，如果有则不阻止事件
                                 const selection = window.getSelection();
@@ -19418,7 +20101,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                 </div>
 
                                                                 {/* Actions */}
-                                                                <div className={`flex flex-col items-center gap-3 justify-between border-l pl-4 pr-1 shrink-0 w-14 ${theme === 'dark' ? 'border-zinc-800' : 'border-zinc-200'
+                                                                <div className={`flex flex-col items-center gap-3 justify-between border-l pl-6 pr-2 shrink-0 w-16 ${theme === 'dark' ? 'border-zinc-800' : 'border-zinc-200'
                                                                     }`}>
                                                                     <div className="flex flex-col items-center gap-2">
                                                                         {(shot.status === 'generating' || shot.status === 'done' || shot.status === 'completed' || shot.status === 'failed' || shot.status === 'error') && (
@@ -19898,6 +20581,8 @@ ${inputText.substring(0, 15000)} ... (截断)
                                     <div
                                         className={`relative flex-1 rounded-lg overflow-hidden flex items-center justify-center min-h-0 ${theme === 'dark' ? 'bg-zinc-900' : 'bg-zinc-100'
                                             }`}
+                                        onDrop={(e) => handlePreviewDrop(node.id, e)}
+                                        onDragOver={handleCanvasDragOver}
                                         onContextMenu={(e) => {
                                             const previewUrl = node.content || (node.previewMjImages && node.previewMjImages[0]);
                                             if (previewUrl) {
@@ -20873,7 +21558,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                 </div>
             </div >
         );
-    }, [selectedNodeId, selectedNodeIds, hoverTargetId, nodeConnectedStatus, adjacentNodesCache, apiConfigsMap, getConnectedInputImages, theme, view, dragNodeId, connectingSource, connectingTarget, connectingInputType, deleteNode, handleNodeMouseUp, screenToWorld, setDragNodeId, setSelectedNodeId, setSelectedNodeIds, setActiveDropdown, setHoverTargetId, setConnectingSource, setConnectingTarget, setConnectingInputType, setResizingNodeId, setLightboxItem, isVideoUrl, updateNodeSettings, getConnectedTextNodes, startGeneration, getDefaultDurationForModel, getDefaultDurationsForModel, getConnectedGenNodes, getConnectedVideoInputNode, getConnectedVideoAnalyzeNode]);
+    }, [selectedNodeId, selectedNodeIds, hoverTargetId, nodeConnectedStatus, adjacentNodesCache, apiConfigsMap, getConnectedInputImages, theme, view, dragNodeId, connectingSource, connectingTarget, connectingInputType, deleteNode, handleNodeMouseUp, screenToWorld, setDragNodeId, setSelectedNodeId, setSelectedNodeIds, setActiveDropdown, setHoverTargetId, setConnectingSource, setConnectingTarget, setConnectingInputType, setResizingNodeId, setLightboxItem, isVideoUrl, updateNodeSettings, getConnectedTextNodes, startGeneration, getDefaultDurationForModel, getDefaultDurationsForModel, getConnectedGenNodes, getConnectedVideoInputNode, getConnectedVideoAnalyzeNode, handleCanvasDragOver, handleGenNodeDrop, markInteraction]);
 
     // 高性能模式：当节点数量超过 50 或手动开启时启用
     const isPerfMode = nodes.length > 50 || globalPerformanceMode !== 'off';
@@ -20894,6 +21579,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                     } ${isPerfMode ? 'perf-mode' : ''} ${isInteracting ? 'interacting' : ''}`}
                 onClick={() => {
                     if (historyContextMenu.visible) setHistoryContextMenu(prev => ({ ...prev, visible: false }));
+                    if (historySendMenuOpen) setHistorySendMenuOpen(false);
                     if (frameContextMenu.visible) setFrameContextMenu(prev => ({ ...prev, visible: false }));
                 }}
             >
@@ -21641,8 +22327,17 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                 刷新缓存（重新下载到新路径）
                                             </button>
                                             <div className="text-[9px] text-zinc-500">
-                                                提示：设置路径后，点击刷新缓存可将素材重新保存到新文件夹。
+                                                提示：设置路径后点击刷新缓存可将素材保存到新文件夹
                                             </div>
+                                            <button
+                                                className={`w-full py-2 rounded text-[10px] font-medium transition-colors ${theme === 'dark'
+                                                    ? 'bg-blue-600/20 text-blue-200 hover:bg-blue-600/30'
+                                                    : 'bg-blue-50 text-blue-600 hover:bg-blue-100'
+                                                    }`}
+                                                onClick={rebuildAllHistoryThumbnails}
+                                            >
+                                                全部重建历史缩略图
+                                            </button>
                                         </div>
                                     </div>
                                 )}
@@ -22233,6 +22928,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                     <div className="flex-1 relative overflow-hidden flex">
                         <div ref={canvasRef} id="canvas-bg" className="flex-1 h-full cursor-default relative"
                             onMouseDown={handleMouseDown} onClick={handleBackgroundClick} onDoubleClick={handleDoubleClick} onContextMenu={handleCanvasContextMenu}
+                            onDrop={handleCanvasDrop} onDragOver={handleCanvasDragOver}
                             style={{
                                 backgroundImage: theme === 'dark'
                                     ? 'radial-gradient(#27272a 1px, transparent 1px)'
@@ -22293,6 +22989,11 @@ ${inputText.substring(0, 15000)} ... (截断)
                                 width: chatWidth,
                                 pointerEvents: isChatOpen ? 'auto' : 'none'
                             }}
+                            onMouseEnter={() => setIsChatHovered(true)}
+                            onMouseLeave={() => setIsChatHovered(false)}
+                            onMouseDown={() => markInteraction('chat')}
+                            onDragOver={handleCanvasDragOver}
+                            onDrop={handleChatDrop}
                         >
                             <div
                                 className={`absolute left-0 top-0 bottom-0 w-1.5 cursor-ew-resize transition-colors z-50 flex items-center justify-center group ${theme === 'dark' ? 'hover:bg-blue-600/50' : 'hover:bg-blue-400/30'
@@ -22687,9 +23388,12 @@ ${inputText.substring(0, 15000)} ... (截断)
                                         <input type="file" multiple className="hidden" onChange={handleChatFileUpload} accept="image/*,video/*,audio/*,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.md,.js,.py,.html,.css,.json,.csv" />
                                     </label>
                                     <textarea
+                                        ref={chatInputRef}
                                         value={chatInput}
                                         onChange={(e) => setChatInput(e.target.value)}
                                         onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChatMessage(); } }}
+                                        onFocus={() => { setIsChatInputFocused(true); markInteraction('chat'); }}
+                                        onBlur={() => setIsChatInputFocused(false)}
                                         placeholder="发送消息..."
                                         className={`w-full bg-transparent text-sm resize-none outline-none max-h-32 py-2 px-1 custom-scrollbar ${theme === 'dark'
                                             ? 'text-white placeholder-zinc-500'
@@ -22825,7 +23529,7 @@ ${inputText.substring(0, 15000)} ... (截断)
 
                         {historyContextMenu.visible && (
                             <div
-                                className={`fixed z-[100] w-48 rounded-lg shadow-2xl py-1 animate-in fade-in duration-100 border ${theme === 'dark' ? 'bg-[#18181b] border-zinc-700' : 'bg-white border-zinc-200'
+                                className={`fixed z-[100] w-max rounded-lg shadow-2xl py-1 animate-in fade-in duration-100 border ${theme === 'dark' ? 'bg-[#18181b] border-zinc-700' : 'bg-white border-zinc-200'
                                     }`}
                                 style={{ left: historyContextMenu.x, top: historyContextMenu.y }}
                             >
@@ -22835,83 +23539,73 @@ ${inputText.substring(0, 15000)} ... (截断)
                                 >
                                     操作
                                 </div>
-                                <button
-                                    className={`w-full text-left px-3 py-2 text-xs flex items-center gap-2 transition-colors ${theme === 'dark'
-                                        ? 'text-zinc-300 hover:bg-zinc-800'
-                                        : 'text-zinc-700 hover:bg-zinc-100'
-                                        }`}
-                                    onClick={sendHistoryToChat}
+                                <div
+                                    className="relative"
+                                    onMouseEnter={openHistorySendMenu}
+                                    onMouseLeave={scheduleHistorySendMenuClose}
                                 >
-                                    <MessageSquare size={14} className="text-purple-500" /> 发送到当前对话
-                                </button>
-                                <button
-                                    className={`w-full text-left px-3 py-2 text-xs flex items-center gap-2 transition-colors ${theme === 'dark'
-                                        ? 'text-zinc-300 hover:bg-zinc-800'
-                                        : 'text-zinc-700 hover:bg-zinc-100'
-                                        }`}
-                                    onClick={sendHistoryToCanvas}
-                                >
-                                    <CopyPlus size={14} className="text-blue-500" /> 发送到画布
-                                </button>
-                                <button
-                                    className={`w-full text-left px-3 py-2 text-xs flex items-center gap-2 transition-colors ${theme === 'dark'
-                                        ? 'text-zinc-300 hover:bg-zinc-800'
-                                        : 'text-zinc-700 hover:bg-zinc-100'
-                                        }`}
-                                    onClick={() => {
-                                        const item = historyContextMenu.item;
-                                        const resolvedUrl = item?.url || item?.localCacheUrl || item?.originalUrl || item?.mjOriginalUrl;
-                                        if (!resolvedUrl) return;
-                                        // 找到所有预览节点，默认更新最近创建的一个
-                                        setNodes(prev => {
-                                            const previews = prev.filter(n => n.type === 'preview');
-                                            if (!previews.length) return prev;
-                                            const targetId = previews[previews.length - 1].id;
-                                            return prev.map(n =>
-                                                n.id === targetId
-                                                    ? { ...n, content: resolvedUrl, previewType: item.type === 'video' ? 'video' : 'image' }
-                                                    : n
-                                            );
-                                        });
-                                        setHistoryContextMenu({ visible: false, x: 0, y: 0, item: null });
-                                    }}
-                                >
-                                    <Maximize2 size={14} className="text-emerald-500" /> 发送到预览窗口
-                                </button>
-                                {/* 拓展图片功能已移除 */}
-                                <button
-                                    className={`w-full text-left px-3 py-2 text-xs flex items-center gap-2 transition-colors ${theme === 'dark'
-                                        ? 'text-zinc-300 hover:bg-zinc-800'
-                                        : 'text-zinc-700 hover:bg-zinc-100'
-                                        }`}
-                                    onClick={applyHistoryToSelectedNode}
-                                >
-                                    <ArrowRightSquare size={14} className={selectedNodeId ? 'text-green-500' : 'text-zinc-400'} /> 应用到选中节点
-                                </button>
-                                <button
-                                    className={`w-full text-left px-3 py-2 text-xs flex items-center gap-2 transition-colors ${theme === 'dark'
-                                        ? 'text-zinc-300 hover:bg-zinc-800'
-                                        : 'text-zinc-700 hover:bg-zinc-100'
-                                        }`}
-                                    onClick={() => {
-                                        const item = historyContextMenu.item;
-                                        const imageUrl = (item.mjImages && item.mjImages.length > 0)
-                                            ? (item.mjImages[item.selectedMjImageIndex || 0] || item.mjImages[0])
-                                            : (item.localCacheUrl || item.url || item.originalUrl || item.mjOriginalUrl);
-                                        if (!imageUrl) return;
-
-                                        if (activeShot.nodeId && activeShot.shotId) {
-                                            // 发送到选中的分镜
-                                            updateShot(activeShot.nodeId, activeShot.shotId, { image_url: imageUrl });
-                                            // 可选：添加一个小提示或动画
-                                        } else {
-                                            alert("请先点击分镜表中的某一行使其处于选中状态");
-                                        }
-                                        setHistoryContextMenu({ visible: false, x: 0, y: 0, worldX: 0, worldY: 0, item: null });
-                                    }}
-                                >
-                                    <LayoutGrid size={14} className={activeShot.nodeId && activeShot.shotId ? 'text-orange-500' : 'text-zinc-400'} /> 发送到当前分镜
-                                </button>
+                                    <button
+                                        className={`w-full whitespace-nowrap text-left px-3 py-2 text-xs flex items-center gap-2 transition-colors ${theme === 'dark'
+                                            ? 'text-zinc-300 hover:bg-zinc-800'
+                                            : 'text-zinc-700 hover:bg-zinc-100'
+                                            }`}
+                                        onClick={sendHistorySmart}
+                                    >
+                                        <Send size={14} className="text-blue-500" /> 智能发送
+                                    </button>
+                                    <button
+                                        className={`absolute right-2 top-2 p-1 rounded ${theme === 'dark'
+                                            ? 'text-zinc-500 hover:text-zinc-200'
+                                            : 'text-zinc-400 hover:text-zinc-700'
+                                            }`}
+                                        onMouseEnter={openHistorySendMenu}
+                                        onClick={(e) => {
+                                            e.stopPropagation();
+                                            setHistorySendMenuOpen(prev => !prev);
+                                        }}
+                                        title="展开发送到"
+                                    >
+                                        <ChevronRight size={12} className={`transition-transform ${historySendMenuOpen ? 'rotate-90' : ''}`} />
+                                    </button>
+                                    {historySendMenuOpen && (
+                                        <div
+                                            className={`absolute left-full top-0 ml-1 w-max rounded-lg shadow-2xl py-1 border ${theme === 'dark'
+                                                ? 'bg-[#18181b] border-zinc-700'
+                                                : 'bg-white border-zinc-200'
+                                                }`}
+                                            onMouseEnter={openHistorySendMenu}
+                                            onMouseLeave={scheduleHistorySendMenuClose}
+                                        >
+                                            <button
+                                                className={`w-full whitespace-nowrap text-left px-3 py-2 text-xs flex items-center gap-2 transition-colors ${theme === 'dark'
+                                                    ? 'text-zinc-300 hover:bg-zinc-800'
+                                                    : 'text-zinc-700 hover:bg-zinc-100'
+                                                    }`}
+                                                onClick={sendHistoryToChat}
+                                            >
+                                                <MessageSquare size={14} className="text-purple-500" /> 发送到对话
+                                            </button>
+                                            <button
+                                                className={`w-full whitespace-nowrap text-left px-3 py-2 text-xs flex items-center gap-2 transition-colors ${theme === 'dark'
+                                                    ? 'text-zinc-300 hover:bg-zinc-800'
+                                                    : 'text-zinc-700 hover:bg-zinc-100'
+                                                    }`}
+                                                onClick={sendHistoryToPreview}
+                                            >
+                                                <Maximize2 size={14} className="text-emerald-500" /> 发送到预览
+                                            </button>
+                                            <button
+                                                className={`w-full whitespace-nowrap text-left px-3 py-2 text-xs flex items-center gap-2 transition-colors ${theme === 'dark'
+                                                    ? 'text-zinc-300 hover:bg-zinc-800'
+                                                    : 'text-zinc-700 hover:bg-zinc-100'
+                                                    }`}
+                                                onClick={sendHistoryToCanvas}
+                                            >
+                                                <CopyPlus size={14} className="text-blue-500" /> 发送到画布
+                                            </button>
+                                        </div>
+                                    )}
+                                </div>
                                 <button
                                     className={`w-full text-left px-3 py-2 text-xs flex items-center gap-2 transition-colors ${theme === 'dark'
                                         ? 'text-zinc-300 hover:bg-zinc-800'
