@@ -4274,6 +4274,34 @@ function TapnowApp() {
         return false;
     }, [providers]);
 
+    const historyLocalCacheMap = useMemo(() => {
+        const map = new Map();
+        history.forEach((item) => {
+            if (!item) return;
+            if (item.localCacheMap) {
+                Object.entries(item.localCacheMap).forEach(([sourceUrl, cacheUrl]) => {
+                    if (sourceUrl && cacheUrl) map.set(sourceUrl, cacheUrl);
+                });
+            }
+            if (item.url && item.localCacheUrl) {
+                map.set(item.url, item.localCacheUrl);
+            }
+        });
+        return map;
+    }, [history]);
+
+    const inferProviderFromUrl = useCallback((rawUrl) => {
+        if (!rawUrl || typeof rawUrl !== 'string') return '';
+        if (!/^https?:/i.test(rawUrl)) return '';
+        try {
+            const host = new URL(rawUrl).hostname.toLowerCase();
+            if (host.includes('modelscope') || host.includes('muse-ai.oss-cn-hangzhou.aliyuncs.com')) return 'modelscope';
+            return '';
+        } catch {
+            return '';
+        }
+    }, []);
+
     const historyUrlProxyMap = useMemo(() => {
         const map = new Map();
         history.forEach((item) => {
@@ -4301,9 +4329,12 @@ function TapnowApp() {
         if (raw.startsWith('data:') || raw.startsWith('blob:')) return false;
         const base = (localServerUrl || '').trim();
         if (base && raw.startsWith(base)) return false;
+        if (historyLocalCacheMap.has(raw)) return false;
         if (historyUrlProxyMap.has(raw)) return !!historyUrlProxyMap.get(raw);
+        const inferred = inferProviderFromUrl(raw);
+        if (inferred && providers[inferred]?.useProxy) return true;
         return !!fallback;
-    }, [historyUrlProxyMap, localServerUrl]);
+    }, [historyUrlProxyMap, historyLocalCacheMap, localServerUrl, inferProviderFromUrl, providers]);
 
     useEffect(() => {
         const nextPath = {
@@ -4618,8 +4649,13 @@ function TapnowApp() {
             };
 
             for (const item of history) {
-                if (item.status !== 'completed' || item.type !== 'image') continue;
-                const useProxy = getItemProxyPreference(item);
+                const status = item?.status;
+                const isCacheableStatus = !status || ['completed', 'complete', 'success', 'done'].includes(status);
+                if (!isCacheableStatus) continue;
+                const candidateUrl = item?.url || item?.originalUrl || item?.mjOriginalUrl || '';
+                const isVideoItem = item?.type === 'video' || isVideoUrl(candidateUrl);
+                if (isVideoItem) continue;
+                const baseProxy = getItemProxyPreference(item);
                 let localCacheUrl = item.localCacheUrl || null;
                 let localFilePath = item.localFilePath || null;
                 let cacheMap = item.localCacheMap ? { ...item.localCacheMap } : {};
@@ -4715,6 +4751,7 @@ function TapnowApp() {
                     }
 
                     try {
+                        const useProxy = getProxyPreferenceForUrl(imageUrl, baseProxy);
                         const result = await saveImageToLocalCache(cacheId, imageUrl, 'history', { forceId: true, useProxy });
                         if (result) {
                             cachedHistoryUrlRef.current.set(imageUrl, result.url);
@@ -4752,7 +4789,7 @@ function TapnowApp() {
 
         const timer = setTimeout(cacheHistoryImages, 3000);
         return () => clearTimeout(timer);
-    }, [history, localCacheActive, localServerConfig.imageSavePath, localServerConfig.videoSavePath, saveImageToLocalCache, sanitizeCacheId, getCacheIdFromUrl, getItemProxyPreference, cacheRefreshTick]);
+    }, [history, localCacheActive, localServerConfig.imageSavePath, localServerConfig.videoSavePath, saveImageToLocalCache, sanitizeCacheId, getCacheIdFromUrl, getItemProxyPreference, getProxyPreferenceForUrl, cacheRefreshTick]);
 
     // V2.6.1 Feature: 历史记录本地缓存（视频）
     useEffect(() => {
@@ -4768,8 +4805,13 @@ function TapnowApp() {
                 return expectedSegment && !text.includes(expectedSegment);
             };
             for (const item of history) {
-                if (item.status !== 'completed' || item.type !== 'video') continue;
-                const useProxy = getItemProxyPreference(item);
+                const status = item?.status;
+                const isCacheableStatus = !status || ['completed', 'complete', 'success', 'done'].includes(status);
+                if (!isCacheableStatus) continue;
+                const videoUrl = item?.url || item?.originalUrl || '';
+                const isVideoItem = item?.type === 'video' || isVideoUrl(videoUrl);
+                if (!isVideoItem) continue;
+                const baseProxy = getItemProxyPreference(item);
                 if (item.localCacheUrl && isCacheUrlMismatch(item.localCacheUrl)) {
                     setHistory(prev => prev.map(h =>
                         h.id === item.id ? { ...h, localCacheUrl: null, localFilePath: null } : h
@@ -4778,13 +4820,12 @@ function TapnowApp() {
                 if (item.localCacheUrl) continue;
                 if (triedCacheIdsRef.current.has(item.id)) continue;
                 triedCacheIdsRef.current.add(item.id);
-
-                const videoUrl = item.url || item.originalUrl;
                 if (videoUrl && (videoUrl.includes('localhost:') || videoUrl.includes('127.0.0.1:'))) continue;
 
                 if (!videoUrl || videoUrl.startsWith('blob:') || videoUrl.includes('...')) continue;
 
                 try {
+                    const useProxy = getProxyPreferenceForUrl(videoUrl, baseProxy);
                     const result = await saveVideoToLocalCache(item.id, videoUrl, 'history', { useProxy });
                     if (result) {
                         setHistory(prev => prev.map(h =>
@@ -4799,7 +4840,7 @@ function TapnowApp() {
 
         const timer = setTimeout(cacheHistoryVideos, 5000);
         return () => clearTimeout(timer);
-    }, [history, localCacheActive, localServerConfig.videoSavePath, saveVideoToLocalCache, getItemProxyPreference, cacheRefreshTick]);
+    }, [history, localCacheActive, localServerConfig.videoSavePath, saveVideoToLocalCache, getItemProxyPreference, getProxyPreferenceForUrl, cacheRefreshTick]);
 
     const canvasRef = useRef(null);
     const lastMousePos = useRef({ x: 0, y: 0 });
@@ -12119,8 +12160,9 @@ function TapnowApp() {
     const getDataUrlFromUrl = async (url, options = {}) => {
         if (!url) return url;
         if (url.startsWith('data:')) return url;
-        const cachedUrl = localCacheActive && cachedHistoryUrlRef.current.has(url)
-            ? cachedHistoryUrlRef.current.get(url)
+        const cachedUrl = localCacheActive
+            ? (historyLocalCacheMap.get(url)
+                || (cachedHistoryUrlRef.current.has(url) ? cachedHistoryUrlRef.current.get(url) : null))
             : null;
         const resolvedUrl = cachedUrl || url;
         const useProxy = getProxyPreferenceForUrl(resolvedUrl, options.useProxy === true);
