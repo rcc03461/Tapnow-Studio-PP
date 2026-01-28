@@ -3946,6 +3946,7 @@ function TapnowApp() {
     const getBlobFromUrl = async (url, options = {}) => {
         if (!url) throw new Error('Invalid URL');
         const preferLocal = options.preferLocal !== false && localCacheActive;
+        const proxyBaseUrl = (options.proxyBaseUrl || localServerUrl || '').trim().replace(/\/+$/, '');
         const rawUrl = String(url);
         const fetchBlob = async (target) => {
             const res = await fetch(target);
@@ -3984,7 +3985,16 @@ function TapnowApp() {
             }
         }
         const useProxy = options.useProxy === true;
-        const resolvedTarget = useProxy ? resolveCacheFetchUrl(targetUrl, true) : targetUrl;
+        let resolvedTarget = targetUrl;
+        if (useProxy) {
+            if (proxyBaseUrl) {
+                resolvedTarget = targetUrl.startsWith(proxyBaseUrl)
+                    ? targetUrl
+                    : `${proxyBaseUrl}/proxy?url=${encodeURIComponent(targetUrl)}`;
+            } else {
+                resolvedTarget = resolveCacheFetchUrl(targetUrl, true);
+            }
+        }
         if (!resolvedTarget) throw new Error('Invalid URL');
         return await fetchBlob(resolvedTarget);
     };
@@ -4117,9 +4127,10 @@ function TapnowApp() {
     }, [getCacheFailureKey]);
     const fetchCacheSource = useCallback(async (imageUrl, options = {}) => {
         const useProxy = options.useProxy === true;
+        const proxyBaseUrl = options.proxyBaseUrl;
         if (!imageUrl) throw new Error('缓存拉取失败: 空链接');
         try {
-            const blob = await getBlobFromUrl(imageUrl, { useProxy, preferLocal: false });
+            const blob = await getBlobFromUrl(imageUrl, { useProxy, preferLocal: false, proxyBaseUrl });
             if (!blob || blob.size === 0) throw new Error('缓存拉取失败: 空文件');
             return { blob, source: imageUrl };
         } catch (err) {
@@ -5903,6 +5914,7 @@ function TapnowApp() {
 
     const buildLocalSaveFiles = useCallback(async (mediaItems = [], options = {}) => {
         const useProxyResolver = options.useProxyResolver;
+        const proxyBaseUrl = options.proxyBaseUrl;
         const files = [];
         const nameCounters = new Map();
         const seenUrls = new Set();
@@ -5917,7 +5929,7 @@ function TapnowApp() {
                 const baseProxy = typeof useProxyResolver === 'function' ? !!useProxyResolver(item) : false;
                 const useProxy = getProxyPreferenceForUrl(url, baseProxy);
                 if (!url.startsWith('data:')) {
-                    const { blob } = await fetchCacheSource(url, { useProxy });
+                    const { blob } = await fetchCacheSource(url, { useProxy, proxyBaseUrl });
                     content = await new Promise((resolve) => {
                         const reader = new FileReader();
                         reader.onloadend = () => resolve(reader.result);
@@ -5984,7 +5996,7 @@ function TapnowApp() {
             return;
         }
 
-        const files = await buildLocalSaveFiles(dedupedItems, { useProxyResolver: getItemProxyPreference });
+        const files = await buildLocalSaveFiles(dedupedItems, { useProxyResolver: getItemProxyPreference, proxyBaseUrl: baseUrl });
         if (files.length === 0) {
             if (!silent) showToast('没有可保存的文件', 'warning');
             return;
