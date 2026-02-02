@@ -24,3 +24,6 @@ Tapnow Studio-V*.html
 .spec-workflow/*
 todo/*
 CLAUDE.md
+scan_i18n*.txt
+src/App.jsx.backup.*
+src_corrupted_*/

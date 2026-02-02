@@ -562,7 +562,8 @@ const HistoryMjImageCell = memo(({
     onImageClick,
     onImageContextMenu,
     onCacheMissing,
-    handleDragStart
+    handleDragStart,
+    language
 }) => {
     const [isLoaded, setIsLoaded] = useState(false);
 
@@ -606,7 +607,7 @@ const HistoryMjImageCell = memo(({
                     className={`absolute inset-0 flex items-center justify-center text-[12px] ${placeholderClass} pointer-events-none select-none`}
                     style={{ fontFamily: '"Microsoft YaHei","微软雅黑","KaiTi","楷体",serif' }}
                 >
-                    图片{idx + 1}
+                    {t('图片')}{idx + 1}
                 </div>
             )}
             {isActive && (
@@ -807,7 +808,8 @@ const HistoryItem = memo(({
     defaultProviders,
     historyLocalCacheMap,
     resolveHistoryUrl,
-    isLocalCacheUrlAvailable
+    isLocalCacheUrlAvailable,
+    language
 }) => {
     const multiImages = Array.isArray(item.mjImages) && item.mjImages.length > 1
         ? item.mjImages
@@ -918,12 +920,12 @@ const HistoryItem = memo(({
             {/* 性能/本地缓存标识 */}
             {hasLocalCache && (
                 <div className={`absolute top-1 left-1 z-10 px-1 py-0.5 rounded text-[8px] bg-black/60 text-green-300`}>
-                    本地
+                    {t('本地')}
                 </div>
             )}
             {!hasLocalCache && performanceMode !== 'off' && thumbnailUrl && (
                 <div className={`absolute top-1 left-1 z-10 px-1 py-0.5 rounded text-[8px] bg-black/60 ${performanceMode === 'ultra' ? 'text-orange-400' : 'text-zinc-400'}`}>
-                    {performanceMode === 'ultra' ? '极速' : '缩略'}
+                    {performanceMode === 'ultra' ? t('极速') : t('缩略')}
                 </div>
             )}
             {/* V3.5.1: 圆形选择按钮 - 始终可见 */}
@@ -978,6 +980,7 @@ const HistoryItem = memo(({
                                         theme={theme}
                                         canDrag={canDrag}
                                         lightboxItem={lightboxItem}
+                                        language={language}
                                         onImageClick={onImageClick}
                                         onImageContextMenu={onImageContextMenu}
                                         onCacheMissing={onCacheMissing}
@@ -1824,7 +1827,7 @@ const DEFAULT_MODEL_LIBRARY = [
             const isVideo = config.type === 'Video';
             const supportsFirstLastFrame = isVideo && /veo3\.1/i.test(config.id);
             const supportsHD = isVideo && /sora-2/i.test(config.id);
-            return ({
+            const entryBase = {
                 id: config.id,
                 displayName: config.id,
                 modelName: config.id,
@@ -1836,8 +1839,11 @@ const DEFAULT_MODEL_LIBRARY = [
                 supportsFirstLastFrame,
                 supportsHD,
                 apiType: DEFAULT_PROVIDERS[config.provider]?.apiType || 'openai',
-                customParams: [],
-                requestTemplate: getDefaultRequestTemplateForType(config.type || 'Chat'),
+                customParams: []
+            };
+            return ({
+                ...entryBase,
+                requestTemplate: getDefaultRequestTemplateForEntry(entryBase),
                 requestOverrideEnabled: false,
                 requestOverridePatch: null
             });
@@ -2049,6 +2055,42 @@ function getDefaultRequestTemplateForType(type) {
         responseParser: '',
         body
     };
+}
+function isJimengVideoModelId(value) {
+    const raw = String(value || '').toLowerCase();
+    if (!raw) return false;
+    return raw.includes('jimeng') || raw.includes('dreamina');
+}
+function getJimengVideoRequestTemplate() {
+    return {
+        enabled: true,
+        endpoint: '/v1/videos/generations',
+        method: 'POST',
+        bodyType: 'auto',
+        headers: { 'Content-Type': 'application/json' },
+        query: {},
+        files: {
+            image_file_1: '{{firstFrame:blob}}',
+            image_file_2: '{{lastFrame:blob}}'
+        },
+        timeoutMs: null,
+        responseParser: 'jimeng.video',
+        body: {
+            model: '{{modelName}}',
+            prompt: '{{prompt}}',
+            duration: '{{jimengDuration:number}}',
+            ratio: '{{jimengRatio}}',
+            resolution: '{{jimengResolution}}'
+        }
+    };
+}
+function getDefaultRequestTemplateForEntry(entry) {
+    const type = entry?.type || 'Chat';
+    const id = entry?.id || entry?.modelName || '';
+    if (type === 'Video' && isJimengVideoModelId(id)) {
+        return getJimengVideoRequestTemplate();
+    }
+    return getDefaultRequestTemplateForType(type);
 }
 const getCustomParamSelection = (param, selections) => {
     if (!param || !selections) return '';
@@ -2286,15 +2328,53 @@ const appendQueryParams = (endpoint, query) => {
     const hash = urlObj.hash || '';
     return `${path}${search}${hash}`;
 };
+const compactTemplateObject = (value) => {
+    if (Array.isArray(value)) {
+        return value
+            .map((item) => compactTemplateObject(item))
+            .filter((item) => item !== undefined && item !== null);
+    }
+    if (value && typeof value === 'object' && !(value instanceof Blob) && !(value instanceof File)) {
+        const next = {};
+        Object.entries(value).forEach(([key, val]) => {
+            if (!key) return;
+            const cleaned = compactTemplateObject(val);
+            if (cleaned === undefined || cleaned === null) return;
+            next[key] = cleaned;
+        });
+        return next;
+    }
+    return value;
+};
+const hasBinaryTemplateValue = (value) => {
+    if (!value) return false;
+    if (value instanceof Blob || value instanceof File) return true;
+    if (typeof value === 'string' && value.startsWith('data:')) return true;
+    if (Array.isArray(value)) return value.some((item) => hasBinaryTemplateValue(item));
+    if (typeof value === 'object') {
+        return Object.values(value).some((item) => hasBinaryTemplateValue(item));
+    }
+    return false;
+};
 const buildRequestFromTemplate = (template, vars, options = {}) => {
     if (!template) return null;
-    const bodyType = (template.bodyType || 'json').toString().toLowerCase();
-    const resolvedEndpoint = resolveTemplateString(template.endpoint || '', vars, { bodyType });
+    const rawBodyType = (template.bodyType || 'json').toString().toLowerCase();
     const method = (template.method || 'POST').toString().toUpperCase();
-    const headers = resolveTemplateValue(template.headers || {}, vars, { bodyType });
-    const resolvedQuery = resolveTemplateValue(template.query || {}, vars, { bodyType });
-    const resolvedBody = resolveTemplateValue(template.body || {}, vars, { bodyType });
-    const resolvedFiles = resolveTemplateValue(template.files || {}, vars, { bodyType });
+    const resolveTemplateWith = (bodyTypeForResolve) => ({
+        resolvedEndpoint: resolveTemplateString(template.endpoint || '', vars, { bodyType: bodyTypeForResolve }),
+        headers: compactTemplateObject(resolveTemplateValue(template.headers || {}, vars, { bodyType: bodyTypeForResolve })),
+        resolvedQuery: compactTemplateObject(resolveTemplateValue(template.query || {}, vars, { bodyType: bodyTypeForResolve })),
+        resolvedBody: compactTemplateObject(resolveTemplateValue(template.body || {}, vars, { bodyType: bodyTypeForResolve })),
+        resolvedFiles: compactTemplateObject(resolveTemplateValue(template.files || {}, vars, { bodyType: bodyTypeForResolve }))
+    });
+    const resolveBodyType = rawBodyType === 'auto' ? 'multipart' : rawBodyType;
+    let { resolvedEndpoint, headers, resolvedQuery, resolvedBody, resolvedFiles } = resolveTemplateWith(resolveBodyType);
+    let bodyType = rawBodyType === 'auto'
+        ? (hasBinaryTemplateValue(resolvedBody) || hasBinaryTemplateValue(resolvedFiles) ? 'multipart' : 'json')
+        : rawBodyType;
+    if (rawBodyType === 'auto' && bodyType === 'json') {
+        ({ resolvedEndpoint, headers, resolvedQuery, resolvedBody, resolvedFiles } = resolveTemplateWith('json'));
+    }
     let body = resolvedBody;
     if (bodyType === 'multipart') {
         const form = new FormData();
@@ -2735,7 +2815,7 @@ const extractKeyFrames = (src, { fps = 2 } = {}) => {
 };
 
 // --- Component: ImageCompareView (Beautified & Optimized) ---
-const ImageCompareView = React.memo(({ img1, img2, theme = 'dark' }) => {
+const ImageCompareView = React.memo(({ img1, img2, theme = 'dark', language }) => {
     const [pos, setPos] = useState(50);
     const containerRef = useRef(null);
     const [isHovering, setIsHovering] = useState(false);
@@ -2825,10 +2905,10 @@ const ImageCompareView = React.memo(({ img1, img2, theme = 'dark' }) => {
                 </div>
             </div>
             <div className={`absolute bottom-2 left-2 bg-black/70 text-white text-[10px] font-medium px-2 py-0.5 rounded border border-white/10 transition-opacity duration-200 pointer-events-none ${isHovering ? 'opacity-100' : 'opacity-60'}`}>
-                原始
+                {t('原始')}
             </div>
             <div className={`absolute bottom-2 right-2 bg-blue-600/80 text-white text-[10px] font-medium px-2 py-0.5 rounded border border-white/10 transition-opacity duration-200 pointer-events-none ${isHovering ? 'opacity-100' : 'opacity-60'}`}>
-                生成
+                {t('生成')}
             </div>
         </div>
     );
@@ -3129,6 +3209,13 @@ function TapnowApp() {
             return 'dark';
         }
     });
+    const [language, setLanguage] = useState('zh');
+
+    useEffect(() => {
+        if (i18n.language !== language) {
+            i18n.changeLanguage(language);
+        }
+    }, [language]);
 
     // V3.7.27: Toast 通知系统
     const [toasts, setToasts] = useState([]);
@@ -3722,7 +3809,7 @@ function TapnowApp() {
                         customParams: normalizeCustomParams(entry.customParams),
                         previewOverrideEnabled: !!entry.previewOverrideEnabled,
                         previewOverridePatch: normalizePreviewOverridePatch(entry.previewOverridePatch),
-                        requestTemplate: normalizeRequestTemplate(entry.requestTemplate || getDefaultRequestTemplateForType(entry.type || 'Chat')),
+                        requestTemplate: normalizeRequestTemplate(entry.requestTemplate || getDefaultRequestTemplateForEntry(entry)),
                         requestOverrideEnabled: !!entry.requestOverrideEnabled,
                         requestOverridePatch: normalizeRequestOverridePatch(entry.requestOverridePatch)
                     })).filter((entry) => entry.id);
@@ -3731,8 +3818,8 @@ function TapnowApp() {
                 console.error('加载 modelLibrary 配置失败:', e);
             }
         }
-        return DEFAULT_MODEL_LIBRARY.map((entry) => ({ ...entry }));
-    });
+    return DEFAULT_MODEL_LIBRARY.map((entry) => ({ ...entry }));
+});
     const collapsedLibraryStateLoadedRef = useRef(false);
     const [collapsedLibraryModels, setCollapsedLibraryModels] = useState(() => {
         const saved = localStorage.getItem('tapnow_model_library_collapsed');
@@ -6515,7 +6602,7 @@ function TapnowApp() {
                 customParams: normalizeCustomParams(entry.customParams),
                 previewOverrideEnabled: !!entry.previewOverrideEnabled,
                 previewOverridePatch: normalizePreviewOverridePatch(entry.previewOverridePatch),
-                requestTemplate: normalizeRequestTemplate(entry.requestTemplate || getDefaultRequestTemplateForType(entry.type || 'Chat')),
+                requestTemplate: normalizeRequestTemplate(entry.requestTemplate || getDefaultRequestTemplateForEntry(entry)),
                 requestOverrideEnabled: !!entry.requestOverrideEnabled,
                 requestOverridePatch: normalizeRequestOverridePatch(entry.requestOverridePatch)
             });
@@ -8601,7 +8688,7 @@ function TapnowApp() {
 
     const addModelLibraryEntry = () => {
         const newId = `model-${Date.now()}`;
-        const newEntry = {
+        const entryBase = {
             id: newId,
             displayName: newId,
             modelName: newId,
@@ -8624,9 +8711,12 @@ function TapnowApp() {
             customParams: [],
             previewOverrideEnabled: false,
             previewOverridePatch: null,
-            requestTemplate: getDefaultRequestTemplateForType('Image'),
             requestOverrideEnabled: false,
             requestOverridePatch: null
+        };
+        const newEntry = {
+            ...entryBase,
+            requestTemplate: getDefaultRequestTemplateForEntry(entryBase)
         };
         setModelLibrary(prev => [...prev, newEntry]);
         setEditingLibraryModels(prev => {
@@ -13674,27 +13764,69 @@ function TapnowApp() {
                                 useProxy
                             }
                         };
+                        if (isJimengVideo) {
+                            const allowedDurations = Array.isArray(config?.durations)
+                                ? config.durations.map((d) => normalizeDurationValue(d, durationValueNum)).filter((d) => Number.isFinite(d))
+                                : (isJimengSora2 ? [4, 8, 12] : [5, 10]);
+                            const ratioOptions = isJimengSora2
+                                ? { defaultRatio: 'auto', allowedRatios: ['16:9', '9:16', 'auto'] }
+                                : { defaultRatio: '1:1' };
+                            const jimengDuration = normalizeJimengVideoDuration(durationValueNum, allowedDurations);
+                            const rawJimengRatio = normalizeJimengVideoRatio(ratio, ratioOptions);
+                            const jimengRatio = (isJimengSora2 && rawJimengRatio === 'auto') ? undefined : rawJimengRatio;
+                            const supportsResolution = supportsJimengVideoResolution(config?.modelName || modelId || '');
+                            const rawResolution = supportsResolution ? normalizeJimengVideoResolution(resolution) : '';
+                            const jimengResolution = supportsResolution && rawResolution ? rawResolution : undefined;
+                            vars.jimengDuration = jimengDuration;
+                            vars.jimengRatio = jimengRatio;
+                            vars.jimengResolution = jimengResolution;
+                        }
                         const inputImages = connectedImages.length > 0
                             ? connectedImages
                             : (sourceImage ? [sourceImage] : []);
                         const imageSources = inputImages.filter(Boolean);
+                        const supportsFirstLastFrame = !!config?.supportsFirstLastFrame;
+                        const useFirstLastFrame = supportsFirstLastFrame && !!(node?.settings?.useFirstLastFrame || node?.settings?.veoFramesMode);
+                        const startFrame = useFirstLastFrame ? getConnectedImageForInput(nodeId, 'veo_start') : null;
+                        const endFrame = useFirstLastFrame ? getConnectedImageForInput(nodeId, 'veo_end') : null;
+                        const firstFrameSource = startFrame || imageSources[0] || null;
+                        const lastFrameSource = endFrame || imageSources[1] || null;
                         if (imageSources.length > 0) {
                             vars.imageUrl = imageSources[0];
                             vars.imageUrls = imageSources;
                             vars.imagesUrl = imageSources;
                             vars.imagesUrls = imageSources;
                         }
+                        vars.firstFrameUrl = firstFrameSource;
+                        vars.lastFrameUrl = lastFrameSource;
                         const templateText = JSON.stringify(requestTemplate || {});
                         const needsBlob = (requestTemplate?.bodyType || '').toLowerCase() === 'multipart'
                             || /:blob\s*}}/.test(templateText);
                         const needsDataUrl = /:blob\s*}}/.test(templateText);
                         if (needsBlob && imageSources.length > 0) {
-                            const blobs = await Promise.all(imageSources.map((url) => getBlobFromUrl(url, { useProxy: resolveSourceProxy(url) })));
+                            const blobMap = new Map();
+                            const blobs = await Promise.all(imageSources.map(async (url) => {
+                                const blob = await getBlobFromUrl(url, { useProxy: resolveSourceProxy(url) });
+                                const normalized = isJimengVideo ? await coerceImageBlobForJimeng(blob) : blob;
+                                blobMap.set(url, normalized);
+                                return normalized;
+                            }));
+                            const ensureBlob = async (sourceUrl) => {
+                                if (!sourceUrl) return null;
+                                if (blobMap.has(sourceUrl)) return blobMap.get(sourceUrl);
+                                const blob = await getBlobFromUrl(sourceUrl, { useProxy: resolveSourceProxy(sourceUrl) });
+                                const normalized = isJimengVideo ? await coerceImageBlobForJimeng(blob) : blob;
+                                blobMap.set(sourceUrl, normalized);
+                                return normalized;
+                            };
                             vars.imageBlob = blobs[0];
                             vars.imageBlobs = blobs;
                             vars.imagesBlob = blobs;
+                            vars.firstFrameBlob = await ensureBlob(firstFrameSource);
+                            vars.lastFrameBlob = await ensureBlob(lastFrameSource);
                         }
                         if (needsDataUrl && imageSources.length > 0) {
+                            const dataUrlMap = new Map();
                             const dataUrls = await Promise.all(imageSources.map(async (url) => {
                                 if (!url) return '';
                                 if (url.startsWith('data:')) return url;
@@ -13705,13 +13837,34 @@ function TapnowApp() {
                                     : ext === '.webp'
                                         ? 'image/webp'
                                         : 'image/png';
-                                return `data:${mime};base64,${base64}`;
+                                const dataUrl = `data:${mime};base64,${base64}`;
+                                dataUrlMap.set(url, dataUrl);
+                                return dataUrl;
                             }));
                             vars.imageDataUrl = dataUrls[0];
                             vars.imageDataURL = dataUrls[0];
                             vars.imageDataUrls = dataUrls;
                             vars.imagesDataUrl = dataUrls;
                             vars.imagesDataURL = dataUrls;
+                            const ensureDataUrl = async (sourceUrl) => {
+                                if (!sourceUrl) return '';
+                                if (dataUrlMap.has(sourceUrl)) return dataUrlMap.get(sourceUrl);
+                                if (sourceUrl.startsWith('data:')) return sourceUrl;
+                                const base64 = await getBase64FromUrl(sourceUrl, { useProxy: resolveSourceProxy(sourceUrl) });
+                                const ext = getUrlExt(sourceUrl, '.png');
+                                const mime = ext === '.jpg' || ext === '.jpeg'
+                                    ? 'image/jpeg'
+                                    : ext === '.webp'
+                                        ? 'image/webp'
+                                        : 'image/png';
+                                const dataUrl = `data:${mime};base64,${base64}`;
+                                dataUrlMap.set(sourceUrl, dataUrl);
+                                return dataUrl;
+                            };
+                            vars.firstFrameDataUrl = await ensureDataUrl(firstFrameSource);
+                            vars.firstFrameDataURL = vars.firstFrameDataUrl;
+                            vars.lastFrameDataUrl = await ensureDataUrl(lastFrameSource);
+                            vars.lastFrameDataURL = vars.lastFrameDataUrl;
                         }
                         if (customParams.length > 0 && customParamSelections) {
                             customParams.forEach((param) => {
@@ -15006,7 +15159,7 @@ function TapnowApp() {
                     supportsFirstLastFrame: !!entry.supportsFirstLastFrame,
                     supportsHD: !!entry.supportsHD,
                     customParams: normalizeCustomParams(entry.customParams),
-                    requestTemplate: normalizeRequestTemplate(entry.requestTemplate || getDefaultRequestTemplateForType(entry.type || 'Chat')),
+                    requestTemplate: normalizeRequestTemplate(entry.requestTemplate || getDefaultRequestTemplateForEntry(entry)),
                     requestOverrideEnabled: !!entry.requestOverrideEnabled,
                     requestOverridePatch: normalizeRequestOverridePatch(entry.requestOverridePatch),
                     previewOverrideEnabled: !!entry.previewOverrideEnabled,
@@ -15407,7 +15560,7 @@ function TapnowApp() {
                     : type === 'video-analyze'
                         ? { model: resolveModelKey(lastUsedAnalyzeModel), segmentDuration: parseInt(lastUsedSegmentDuration), analysisMode: 'manual', voiceoverResults: [], analysisResults: [] }
                         : type === 'storyboard-node'
-                            ? { projectTitle: '未命名分镜', shots: [] }
+                            ? { projectTitle: t('未命名分镜'), shots: [] }
                                     : type === 'text-node'
                                         ? { text: initialContent || '' }
                                         : type === 'novel-input'
@@ -16249,7 +16402,7 @@ function TapnowApp() {
             width: 600,
             height: 500,
             settings: {
-                projectTitle: 'AI 拆解结果',
+                projectTitle: t('AI 拆解结果'),
                 shots: newShots
             }
         };
@@ -18846,7 +18999,7 @@ ${inputText.substring(0, 15000)} ... (截断)
         if (targetNode && targetNode.type === 'input-image') {
             setNodes(prev => prev.map(n => n.id === targetId ? { ...n, content: frame.url } : n));
         } else {
-            alert('请先选择一个"图片输入"节点');
+            alert(t('请先选择一个"图片输入"节点'));
         }
         closeFrameContextMenu();
     };
@@ -18880,7 +19033,7 @@ ${inputText.substring(0, 15000)} ... (截断)
         if (targetNode && targetNode.type === 'input-image' && resolvedUrl) {
             setNodes(prev => prev.map(n => n.id === targetId ? { ...n, content: resolvedUrl } : n));
         } else {
-            alert('请先选择一个"图片输入"节点');
+            alert(t('请先选择一个"图片输入"节点'));
         }
         setHistoryContextMenu({ visible: false, x: 0, y: 0, item: null });
     };
@@ -21540,7 +21693,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                             </div>
                                                             {selectedImageIndex === idx && (
                                                                 <div className="absolute top-1 right-1 bg-blue-500 text-white text-[10px] px-1 py-0.5 rounded">
-                                                                    已选中
+                                                                    {t('已选中')}
                                                                 </div>
                                                             )}
                                                         </div>
@@ -21554,7 +21707,7 @@ ${inputText.substring(0, 15000)} ... (截断)
 
                                             {latestGenerating && (
                                                 <div className="mb-2">
-                                                    <div className="text-[10px] mb-1 text-zinc-500">正在生成图片...</div>
+                                                    <div className="text-[10px] mb-1 text-zinc-500">{t('正在生成图片...')}</div>
                                                     <div className={`w-full h-1.5 rounded-full overflow-hidden ${theme === 'dark' ? 'bg-zinc-800' : 'bg-zinc-200'}`}>
                                                         <div
                                                             className="h-full bg-blue-500 transition-all duration-300"
@@ -21644,7 +21797,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                             </div>
 
                                             <div>
-                                                <label className="text-[10px] block mb-1 text-zinc-500">时间范围（秒，间隔需在 1-3 秒之间）</label>
+                                                <label className="text-[10px] block mb-1 text-zinc-500">{t('时间范围（秒，间隔需在 1-3 秒之间）')}</label>
                                                 <div className="flex gap-2 items-center flex-wrap">
                                                     <input
                                                         type="number"
@@ -21858,7 +22011,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                 </div>
                                 <div className="flex-1 overflow-y-auto p-3 custom-scrollbar flex flex-col gap-3">
                                     <div className="flex flex-col gap-1.5">
-                                        <label className="text-[10px] font-medium opacity-70">服务器地址</label>
+                                        <label className="text-[10px] font-medium opacity-70">{t('服务器地址')}</label>
                                         <div className="flex items-center gap-2">
                                             <input
                                                 type="text"
@@ -21876,12 +22029,12 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                 onMouseDown={(e) => e.stopPropagation()}
                                                 onClick={() => testLocalSaveServer(node.id, node.settings?.serverUrl || '')}
                                             >
-                                                测试
+                                                {t('测试')}
                                             </button>
                                         </div>
                                     </div>
                                     <div className="flex flex-col gap-1.5">
-                                        <label className="text-[10px] font-medium opacity-70">子文件夹</label>
+                                        <label className="text-[10px] font-medium opacity-70">{t('子文件夹')}</label>
                                         <input
                                             type="text"
                                             value={node.settings?.subfolder || ''}
@@ -21892,7 +22045,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                         />
                                     </div>
                                     <div className="flex items-center justify-between">
-                                        <label className="text-[10px] font-medium opacity-70">自动保存 (新图片)</label>
+                                        <label className="text-[10px] font-medium opacity-70">{t('自动保存 (新图片)')}</label>
                                         <button
                                             className={`w-10 h-5 rounded-full relative transition-colors ${node.settings?.autoSave ? 'bg-green-600' : theme === 'solarized' ? 'bg-zinc-300' : 'bg-zinc-600'}`}
                                             onClick={() => updateNodeSettings(node.id, { autoSave: !node.settings?.autoSave })}
@@ -22044,7 +22197,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                         }`}
                                                     onMouseDown={(e) => e.stopPropagation()}
                                                 >
-                                                    更换 <input type="file" className="hidden" accept="image/*" onChange={(e) => handleFileUpload(node.id, e)} />
+                                                    {t('更换')} <input type="file" className="hidden" accept="image/*" onChange={(e) => handleFileUpload(node.id, e)} />
                                                 </label>
                                                 {!isVideoUrl(node.content) && (
                                                     <button
@@ -22067,7 +22220,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                         onMouseDown={(e) => e.stopPropagation()}
                                                     >
                                                         <Brush size={12} />
-                                                        局部重绘
+                                                        {t('局部重绘')}
                                                     </button>
                                                 )}
                                             </div>
@@ -22075,9 +22228,9 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                 className={`text-[10px] text-center px-2 ${theme === 'dark' ? 'text-zinc-300' : 'text-zinc-500'
                                                     }`}
                                             >
-                                                或拖放图片到此处
+                                                {t('或拖放图片到此处')}
                                                 <br />
-                                                或 Ctrl+V 粘贴
+                                                {t('或 Ctrl+V 粘贴')}
                                             </div>
                                         </div>
                                     )}
@@ -22146,16 +22299,16 @@ ${inputText.substring(0, 15000)} ... (截断)
                                             }`}
                                         onMouseDown={(e) => e.stopPropagation()}
                                     >
-                                        选择图片
+                                        {t('选择图片')}
                                         <input type="file" className="hidden" accept="image/*" onChange={(e) => handleFileUpload(node.id, e)} />
                                     </label>
                                     <div
                                         className={`text-[10px] text-center mt-2 pointer-events-none ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-500'
                                             }`}
                                     >
-                                        或拖放图片到此处
+                                        {t('或拖放图片到此处')}
                                         <br />
-                                        或 Ctrl+V 粘贴
+                                        {t('或 Ctrl+V 粘贴')}
                                     </div>
                                 </div>
                             )}
@@ -22241,7 +22394,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                 className="bg-blue-600 hover:bg-blue-500 text-white px-3 py-1.5 rounded text-xs font-medium transition-colors cursor-pointer"
                                                 onMouseDown={(e) => e.stopPropagation()}
                                             >
-                                                更换视频
+                                                {t('更换视频')}
                                                 <input
                                                     type="file"
                                                     className="hidden"
@@ -22257,7 +22410,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                 onMouseDown={(e) => e.stopPropagation()}
                                                 onClick={() => handleAutoExtractKeyframes(node.id, 2)}
                                             >
-                                                <span className="whitespace-nowrap">自动抽帧（2fps）</span>
+                                                <span className="whitespace-nowrap">{t('自动抽帧（2fps）')}</span>
                                             </button>
                                             <button
                                                 className={`px-3 py-1.5 rounded text-xs border transition-colors ${theme === 'dark'
@@ -22267,10 +22420,10 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                 onMouseDown={(e) => e.stopPropagation()}
                                                 onClick={() => handleSmartExtractKeyframes(node.id, 30)}
                                             >
-                                                <span className="whitespace-nowrap">智能抽帧</span>
+                                                <span className="whitespace-nowrap">{t('智能抽帧')}</span>
                                             </button>
                                             {node.extractingFrames && (
-                                                <span className="text-[11px] text-blue-500">抽帧中...</span>
+                                                <span className="text-[11px] text-blue-500">{t('抽帧中...')}</span>
                                             )}
                                         </div>
                                     </div>
@@ -22290,7 +22443,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                     <label className="cursor-pointer flex flex-col items-center justify-center w-full h-full">
                                                         <UploadCloud size={48} className={`mb-2 ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-400'}`} />
                                                         <span className={`text-xs ${theme === 'dark' ? 'text-zinc-400' : 'text-zinc-500'}`}>
-                                                            点击选择或拖入视频
+                                                            {t('点击选择或拖入视频')}
                                                         </span>
                                                         <input
                                                             type="file"
@@ -22301,7 +22454,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                     </label>
                                                 </div>
                                                 <div className="text-[10px] text-center text-zinc-500 pointer-events-none">
-                                                    支持 MP4/WEBM，拖拽或 Ctrl+V 不可用
+                                                    {t('支持 MP4/WEBM，拖拽或 Ctrl+V 不可用')}
                                                 </div>
                                             </div>
                                         </div>
@@ -22338,10 +22491,10 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                         ? 'bg-blue-600/30 text-blue-300 hover:bg-blue-600/50'
                                                         : 'bg-blue-100 text-blue-600 hover:bg-blue-200'}`}
                                                     onMouseDown={(e) => e.stopPropagation()}
-                                                    title={(node.selectedKeyframes || []).length > 0 ? "取消全选" : "全选"}
+                                                    title={(node.selectedKeyframes || []).length > 0 ? t('取消全选') : t('全选')}
                                                 >
                                                     {(node.selectedKeyframes || []).length > 0 ? <Square size={10} /> : <CheckSquare size={10} />}
-                                                    {(node.selectedKeyframes || []).length > 0 ? "取消" : "全选"}
+                                                    {(node.selectedKeyframes || []).length > 0 ? t('取消') : t('全选')}
                                                 </button>
                                                 <button
                                                     onClick={() => {
@@ -22388,8 +22541,8 @@ ${inputText.substring(0, 15000)} ... (截断)
                                     {(node.frames || []).length === 0 ? (
                                         <div className={`col-span-full text-[11px] text-zinc-500 text-center py-4 border rounded ${theme === 'dark' ? 'bg-zinc-800/40 border-zinc-700' : 'bg-white/40 border-zinc-300'
                                             }`}>
-                                            点击「自动抽帧」即可生成缩略图
-                                            <div className="mt-1 opacity-50 text-[9px]">可拖拽图片插入</div>
+                                            {t('点击「自动抽帧」即可生成缩略图')}
+                                            <div className="mt-1 opacity-50 text-[9px]">{t('可拖拽图片插入')}</div>
                                         </div>
                                     ) : (
                                         (node.frames || []).map((frame, idx) => {
@@ -23219,7 +23372,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                         <div className="flex items-center gap-1 shrink-0">
                                             <LayoutGrid size={16} className="text-purple-500" />
                                             <span className={`font-bold text-xs ${theme === 'dark' ? 'text-zinc-200' : 'text-zinc-800'}`}>
-                                                智能分镜
+                                                {t('智能分镜')}
                                             </span>
                                             <span className={`text-xs ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-400'}`}>/</span>
                                             {/* V3.7.25: 点击画笔才能编辑，否则可拖动 */}
@@ -23380,7 +23533,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                             });
                                                             updateNodeSettings(node.id, { shots: mergedShots });
                                                         } else {
-                                                            alert('未在文本中找到分镜标记 (例如: #1 镜头内容)。请检查上游节点文本格式。');
+                                                            alert(t('未在文本中找到分镜标记 (例如: #1 镜头内容)。请检查上游节点文本格式。'));
                                                         }
                                                     } else {
                                                         // 无上游节点，显示手动输入框
@@ -23389,10 +23542,10 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                 }}
                                                 className={`text-xs px-2 py-1 rounded transition-colors flex items-center gap-1 ${theme === 'dark' ? 'bg-purple-600 hover:bg-purple-500 text-white' : 'bg-purple-500 hover:bg-purple-400 text-white'}`}
                                                 onMouseDown={(e) => e.stopPropagation()}
-                                                title={getConnectedTextNodes(node.id).length > 0 ? '从上游文本节点导入脚本' : '展开脚本输入区'}
+                                                title={getConnectedTextNodes(node.id).length > 0 ? t('从上游文本节点导入脚本') : t('展开脚本输入区')}
                                             >
                                                 <FileText size={12} />
-                                                <span className="whitespace-nowrap">脚本</span>
+                                                <span className="whitespace-nowrap">{t('脚本')}</span>
                                             </button>
                                             {/* V3.5.18: 导入关键帧按钮 */}
                                             {(() => {
@@ -23445,10 +23598,12 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                             : theme === 'dark' ? 'bg-zinc-700 text-zinc-400 cursor-not-allowed' : 'bg-zinc-200 text-zinc-500 cursor-not-allowed'}`}
                                                         onMouseDown={(e) => e.stopPropagation()}
                                                         disabled={keyframeCount === 0}
-                                                        title={keyframeCount > 0 ? `导入 ${keyframeCount} 张关键帧` : '请先连接视频输入节点并选择关键帧'}
+                                                        title={keyframeCount > 0
+                                                            ? `${t('导入')} ${keyframeCount} ${t('张关键帧')}`
+                                                            : t('请先连接视频输入节点并选择关键帧')}
                                                     >
                                                         <ImageIcon size={12} />
-                                                        <span className="whitespace-nowrap">导入{keyframeCount > 0 ? ` (${keyframeCount})` : ''}</span>
+                                                        <span className="whitespace-nowrap">{t('导入')}{keyframeCount > 0 ? ` (${keyframeCount})` : ''}</span>
                                                     </button>
                                                 );
                                             })()}
@@ -23490,7 +23645,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                         title={`从 ${currentMode === 'image' ? '图片' : '视频'}节点同步: ${sourceSettings.model || '?'} / ${sourceSettings.ratio || '?'} / ${sourceSettings.resolution || '?'}${currentMode === 'video' ? ` / ${sourceSettings.duration || '?'}` : ''}`}
                                                     >
                                                         <RefreshCw size={12} />
-                                                        <span className="whitespace-nowrap">参数</span>
+                                                        <span className="whitespace-nowrap">{t('参数')}</span>
                                                     </button>
                                                 );
                                             })()}
@@ -23633,7 +23788,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                 >
                                                     <div className="flex items-center gap-1">
                                                         {(node.settings?.mode || 'video') === 'image' ? <ImageIcon size={12} /> : <Zap size={12} fill="currentColor" />}
-                                                        <span className="text-[10px] font-medium whitespace-nowrap">批量</span>
+                                                        <span className="text-[10px] font-medium whitespace-nowrap">{t('批量')}</span>
                                                     </div>
                                                 </button>
                                                 {/* V3.8: 批量下载按钮（全部/选中） */}
@@ -23770,7 +23925,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                         ? 'bg-zinc-800 text-zinc-300 hover:bg-zinc-700'
                                                                         : 'bg-zinc-100 text-zinc-600 hover:bg-zinc-200'}`}
                                                                 >
-                                                                    清空排队
+                                                                    {t('清空排队')}
                                                                 </button>
                                                                 <button
                                                                     onClick={() => {
@@ -23782,7 +23937,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                         ? 'bg-red-900/40 text-red-300 hover:bg-red-900/60'
                                                                         : 'bg-red-50 text-red-600 hover:bg-red-100'}`}
                                                                 >
-                                                                    终止全部
+                                                                    {t('终止全部')}
                                                                 </button>
                                                             </div>
                                                             {nodeRunningItems.length > 0 && (
@@ -23897,7 +24052,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                             onMouseDown={(e) => e.stopPropagation()}
                                                             title={t('全选/取消锁定（灰框勾选的不参与批量生成）')}
                                                         >
-                                                            {(node.settings?.shots || []).every(s => s.outputEnabled) ? '取消' : '全选'}
+                                                            {(node.settings?.shots || []).every(s => s.outputEnabled) ? t('取消') : t('全选')}
                                                         </button>
                                                         <button
                                                             onClick={(e) => {
@@ -23932,7 +24087,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                         onMouseDown={(e) => e.stopPropagation()}
                                                         title={t('全选/取消锁定')}
                                                     >
-                                                        {(node.settings?.shots || []).every(s => s.outputEnabled) ? '取消' : '全选'}
+                                                        {(node.settings?.shots || []).every(s => s.outputEnabled) ? t('取消') : t('全选')}
                                                     </button>
                                                 )}
                                                 </div>
@@ -24034,7 +24189,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                         className="px-3 py-1.5 text-xs bg-purple-600 text-white rounded hover:bg-purple-500 transition-colors"
                                                         onMouseDown={(e) => e.stopPropagation()}
                                                     >
-                                                        程序拆分
+                                                        {t('程序拆分')}
                                                     </button>
                                                     {/* V3.7.25: LLM 智能拆分按钮 */}
                                                     <button
@@ -24278,7 +24433,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                             const renderVideoCard = (type, isMain) => {
                                                                                 const field = type === 'first' ? 'image_url' : 'lastFrame';
                                                                                 const imgUrl = shot[field];
-                                                                                const label = type === 'first' ? '首帧' : '尾帧';
+                                                                                const label = type === 'first' ? t('首帧') : t('尾帧');
                                                                                 // V3.7.5: H-Split Logic: Main = flex-1 (wider), Sub = w-14 (narrower)
                                                                                 const sizeClass = isMain ? 'flex-1 h-full' : 'w-14 h-full shrink-0';
 
@@ -24368,7 +24523,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                                         ) : (
                                                                                             <div className="flex flex-col items-center gap-1 text-zinc-500">
                                                                                                 <FolderOpen size={20} />
-                                                                                                <span className="text-[10px]">选择图片</span>
+                                                                                                <span className="text-[10px]">{t('选择图片')}</span>
                                                                                             </div>
                                                                                         )}
                                                                                         {/* 上传覆盖层 */}
@@ -25401,7 +25556,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                 onMouseDown={(e) => e.stopPropagation()}
                                             >
                                                 <LayoutGrid size={32} className="opacity-50" />
-                                                <span className="text-xs">暂无分镜，请添加或同步分析结果</span>
+                                                <span className="text-xs">{t('暂无分镜，请添加或同步分析结果')}</span>
                                             </div>
                                         )}
                                     </div>
@@ -25421,7 +25576,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                 }`}
                                             onMouseDown={(e) => e.stopPropagation()}
                                         >
-                                            <Plus size={14} /> 添加空白镜头
+                                            <Plus size={14} /> {t('添加空白镜头')}
                                         </button>
                                     </div>
                                 </div>
@@ -25437,6 +25592,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                 img1={connectedImages[0]}
                                 img2={connectedImages[1]}
                                 theme={theme}
+                                language={language}
                             />
                         </div>
                     )
@@ -25573,7 +25729,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                             }}
                                         >
                                             <CopyPlus size={13} />
-                                            复制链接
+                                            {t('复制链接')}
                                         </button>
                                         <button
                                             className={`flex-1 inline-flex items-center justify-center gap-1 px-2 py-1 rounded border ${theme === 'dark'
@@ -25595,7 +25751,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                             }}
                                         >
                                             <ArrowRightSquare size={13} />
-                                            发送到画布
+                                            {t('发送到画布')}
                                         </button>
                                         <button
                                             className={`flex-1 inline-flex items-center justify-center gap-1 px-2 py-1 rounded border ${theme === 'dark'
@@ -25619,7 +25775,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                             }}
                                         >
                                             <MessageSquare size={13} />
-                                            发送到对话
+                                            {t('发送到对话')}
                                         </button>
                                     </div>
                                 </div>
@@ -25899,7 +26055,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                     {t('首尾帧')}
                                                 </div>
                                                 <div className={`text-[10px] ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-500'}`}>
-                                                    第一张为首帧，第二张为尾帧（最多 2 张）
+                                                    {t('第一张为首帧，第二张为尾帧（最多 2 张）')}
                                                 </div>
 
                                                 {/* 首帧 */}
@@ -25929,7 +26085,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                 <LazyBase64Image src={startFrame} className="w-full h-full object-cover" />
                                                             </div>
                                                         ) : (
-                                                            <span className={`text-[10px] ${theme === 'dark' ? 'text-zinc-600' : 'text-zinc-400'}`}>未连接</span>
+                                                            <span className={`text-[10px] ${theme === 'dark' ? 'text-zinc-600' : 'text-zinc-400'}`}>{t('未连接')}</span>
                                                         )}
                                                     </div>
                                                 </div>
@@ -25961,7 +26117,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                 <LazyBase64Image src={endFrame} className="w-full h-full object-cover" />
                                                             </div>
                                                         ) : (
-                                                            <span className={`text-[10px] ${theme === 'dark' ? 'text-zinc-600' : 'text-zinc-400'}`}>未连接</span>
+                                                            <span className={`text-[10px] ${theme === 'dark' ? 'text-zinc-600' : 'text-zinc-400'}`}>{t('未连接')}</span>
                                                         )}
                                                     </div>
                                                 </div>
@@ -26626,7 +26782,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                             startGeneration(finalPrompt, node.type === 'gen-image' ? 'image' : 'video', connectedImages, node.id, {
                                                 customParams: node.settings?.customParams
                                             });
-                                        }} className="bg-blue-600 hover:bg-blue-500 text-white p-1.5 rounded-md shadow-lg active:scale-95 transition-transform shrink-0" title="生成">
+                                        }} className="bg-blue-600 hover:bg-blue-500 text-white p-1.5 rounded-md shadow-lg active:scale-95 transition-transform shrink-0" title={t('生成')}>
                                             <Play size={12} fill="currentColor" />
                                         </button>
                                     </div>
@@ -26818,6 +26974,18 @@ ${inputText.substring(0, 15000)} ... (截断)
                                 );
                             })()}
                         </button>
+                        <button
+                            onClick={() => setLanguage(prev => prev === 'zh' ? 'en' : 'zh')}
+                            className={`flex items-center gap-1 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors border ${theme === 'dark'
+                                ? 'bg-zinc-900 border-zinc-700 text-zinc-200 hover:bg-zinc-800'
+                                : theme === 'solarized'
+                                    ? 'bg-[#616161] border-[#525252] text-[#fdf6e3] hover:bg-[#555555]'
+                                    : 'bg-zinc-100 border-zinc-300 text-zinc-700 hover:bg-zinc-200'
+                                }`}
+                            title={t('切换语言')}
+                        >
+                            <span>{language === 'zh' ? t('中文') : t('英文')}</span>
+                        </button>
                         {/* V3.4.6: 撤销/重做按钮 */}
                         <button
                             onClick={undo}
@@ -26870,7 +27038,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                             onClick={() => setSettingsOpen(true)}
                             className={theme === 'solarized' ? '!bg-[#616161] !border-[#525252] !text-[#fdf6e3] hover:!bg-[#555555]' : ''}
                         >
-                            API 设置
+                            {t('API 设置')}
                         </Button>
                     </div>
                 </div>
@@ -26989,8 +27157,8 @@ ${inputText.substring(0, 15000)} ... (截断)
                                         className={`font-bold text-xs leading-tight ${theme === 'dark' ? 'text-zinc-300' : 'text-zinc-700'
                                             }`}
                                     >
-                                        <span className="block">生成</span>
-                                        <span className="block">历史</span>
+                                        <span className="block">{t('生成')}</span>
+                                        <span className="block">{t('历史')}</span>
                                     </h3>
                                     {/* V3.4.12: 下载进度条 */}
                                     {downloadProgress.active && (
@@ -27094,7 +27262,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                 ? 'text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800'
                                                 : 'text-zinc-500 hover:text-zinc-700 hover:bg-zinc-200'
                                             }`}
-                                        title={historySelection.size > 0 ? `取消全选 (${historySelection.size})` : '全选'}
+                                        title={historySelection.size > 0 ? `${t('取消全选')} (${historySelection.size})` : t('全选')}
                                     >
                                         {historySelection.size > 0 ? <CheckCircle2 size={14} /> : <Circle size={14} />}
                                         {historySelection.size > 0 && (
@@ -27129,7 +27297,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                     ? 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800'
                                                     : 'text-zinc-500 hover:text-zinc-700 hover:bg-zinc-200'
                                                 }`}
-                                            title={historySelection.size > 0 ? `下载选中 (${historySelection.size})` : '批量下载'}
+                                            title={historySelection.size > 0 ? `${t('下载选中')} (${historySelection.size})` : t('批量下载')}
                                         >
                                             <Download size={14} />
                                         </button>
@@ -27153,7 +27321,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                         : 'text-zinc-700 hover:bg-zinc-100'
                                                         }`}
                                                 >
-                                                    本次生成 ({history.filter(item => (item.startTime || 0) >= sessionStartTime).length})
+                                                    {t('本次生成')} ({history.filter(item => (item.startTime || 0) >= sessionStartTime).length})
                                                 </button>
                                                 <button
                                                     onClick={() => {
@@ -27165,7 +27333,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                         : 'text-zinc-700 hover:bg-zinc-100'
                                                         }`}
                                                 >
-                                                    全部资产 ({history.length})
+                                                    {t('全部资产')} ({history.length})
                                                 </button>
                                             </div>
                                         )}
@@ -27225,7 +27393,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                             : 'bg-zinc-100 text-zinc-500 hover:text-zinc-700'
                                                         }`}
                                                 >
-                                                    管线
+                                                    {t('管线')}
                                                 </button>
                                                 <button
                                                     onClick={() => setBatchQueueMode('parallel')}
@@ -27238,7 +27406,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                             : 'bg-zinc-100 text-zinc-500 hover:text-zinc-700'
                                                         }`}
                                                 >
-                                                    并行
+                                                    {t('并行')}
                                                 </button>
                                             </div>
                                         </div>
@@ -27313,7 +27481,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                 ? 'bg-zinc-800 text-zinc-300 hover:bg-zinc-700'
                                                                 : 'bg-zinc-100 text-zinc-600 hover:bg-zinc-200'}`}
                                                         >
-                                                            清空排队
+                                                            {t('清空排队')}
                                                         </button>
                                                         <button
                                                             onClick={() => {
@@ -27324,7 +27492,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                 ? 'bg-red-900/40 text-red-300 hover:bg-red-900/60'
                                                                 : 'bg-red-50 text-red-600 hover:bg-red-100'}`}
                                                         >
-                                                            终止全部
+                                                            {t('终止全部')}
                                                         </button>
                                                     </div>
                                                     {queueGroups.length === 0 ? (
@@ -27426,7 +27594,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                     <div className={`rounded-lg border p-3 space-y-3 ${theme === 'dark' ? 'bg-zinc-900/60 border-zinc-800' : 'bg-white border-zinc-200'}`}>
                                         <div className="space-y-2">
                                             <div>
-                                                <label className="text-[10px] block mb-1 text-zinc-500">图片保存路径</label>
+                                                <label className="text-[10px] block mb-1 text-zinc-500">{t('图片保存路径')}</label>
                                                 <div className="flex items-center gap-2">
                                                     <input
                                                         type="text"
@@ -27448,12 +27616,12 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                         onClick={() => pickLocalCachePath('imageSavePath', 'image_save_path')}
                                                         className={`px-2 py-1.5 text-[10px] rounded border ${theme === 'dark' ? 'bg-zinc-800 text-zinc-300 border-zinc-700 hover:bg-zinc-700' : 'bg-zinc-100 text-zinc-700 border-zinc-300 hover:bg-zinc-200'}`}
                                                     >
-                                                        浏览
+                                                        {t('浏览')}
                                                     </button>
                                                 </div>
                                             </div>
                                             <div>
-                                                <label className="text-[10px] block mb-1 text-zinc-500">视频保存路径</label>
+                                                <label className="text-[10px] block mb-1 text-zinc-500">{t('视频保存路径')}</label>
                                                 <div className="flex items-center gap-2">
                                                     <input
                                                         type="text"
@@ -27475,14 +27643,14 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                         onClick={() => pickLocalCachePath('videoSavePath', 'video_save_path')}
                                                         className={`px-2 py-1.5 text-[10px] rounded border ${theme === 'dark' ? 'bg-zinc-800 text-zinc-300 border-zinc-700 hover:bg-zinc-700' : 'bg-zinc-100 text-zinc-700 border-zinc-300 hover:bg-zinc-200'}`}
                                                     >
-                                                        浏览
+                                                        {t('浏览')}
                                                     </button>
                                                 </div>
                                             </div>
                                             <div className="flex items-center justify-between">
                                                 <div>
-                                                    <span className="text-[10px] text-zinc-500">启用本地缓存</span>
-                                                    <div className="text-[9px] text-zinc-500 mt-0.5">关闭后不再使用本地缓存并隐藏提示条</div>
+                                                    <span className="text-[10px] text-zinc-500">{t('启用本地缓存')}</span>
+                                                    <div className="text-[9px] text-zinc-500 mt-0.5">{t('关闭后不再使用本地缓存并隐藏提示条')}</div>
                                                 </div>
                                                 <button
                                                     className={`w-10 h-5 rounded-full relative transition-colors ${localCacheEnabled ? 'bg-green-600' : theme === 'solarized' ? 'bg-zinc-300' : 'bg-zinc-600'}`}
@@ -27493,8 +27661,8 @@ ${inputText.substring(0, 15000)} ... (截断)
                                             </div>
                                             <div className="flex items-center justify-between">
                                                 <div>
-                                                    <span className="text-[10px] text-zinc-500">启用缓存时重新下载</span>
-                                                    <div className="text-[9px] text-zinc-500 mt-0.5">开启后会忽略已存在文件</div>
+                                                    <span className="text-[10px] text-zinc-500">{t('启用缓存时重新下载')}</span>
+                                                    <div className="text-[9px] text-zinc-500 mt-0.5">{t('开启后会忽略已存在文件')}</div>
                                                 </div>
                                                 <button
                                                     className={`w-10 h-5 rounded-full relative transition-colors ${cacheRedownloadOnEnable ? 'bg-green-600' : theme === 'solarized' ? 'bg-zinc-300' : 'bg-zinc-600'}`}
@@ -27504,7 +27672,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                 </button>
                                             </div>
                                             <div className="flex items-center justify-between">
-                                                <span className="text-[10px] text-zinc-500">PNG 转 JPG（省空间）</span>
+                                                <span className="text-[10px] text-zinc-500">{t('PNG 转 JPG（省空间）')}</span>
                                                 <button
                                                     className={`w-10 h-5 rounded-full relative transition-colors ${localServerConfig.convertPngToJpg ? 'bg-green-600' : theme === 'solarized' ? 'bg-zinc-300' : 'bg-zinc-600'} ${!localServerConfig.pilAvailable ? 'opacity-50 cursor-not-allowed' : ''}`}
                                                     onClick={() => {
@@ -27519,7 +27687,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                 </button>
                                             </div>
                                             {!localServerConfig.pilAvailable && (
-                                                <div className="text-[9px] text-amber-400">PIL 未安装，PNG 转 JPG 不可用</div>
+                                                <div className="text-[9px] text-amber-400">{t('PIL 未安装，PNG 转 JPG 不可用')}</div>
                                             )}
                                             <button
                                                 className={`w-full py-2 rounded text-[10px] font-medium transition-colors ${theme === 'dark'
@@ -27528,10 +27696,10 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                     }`}
                                                 onClick={refreshLocalCache}
                                             >
-                                                刷新缓存（重新下载到新路径）
+                                                {t('刷新缓存（重新下载到新路径）')}
                                             </button>
                                             <div className="text-[9px] text-zinc-500">
-                                                提示：设置路径后点击刷新缓存可将素材保存到新文件夹
+                                                {t('提示：设置路径后点击刷新缓存可将素材保存到新文件夹')}
                                             </div>
                                             <button
                                                 className={`w-full py-2 rounded text-[10px] font-medium transition-colors ${theme === 'dark'
@@ -27540,7 +27708,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                     }`}
                                                 onClick={rebuildAllHistoryThumbnails}
                                             >
-                                                全部重建历史缩略图
+                                                {t('全部重建历史缩略图')}
                                             </button>
                                         </div>
                                     </div>
@@ -27555,7 +27723,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                 <>
                                                     <div className={`flex items-center gap-2 text-[10px] ${theme === 'dark' ? 'text-blue-400' : 'text-blue-600'}`}>
                                                         <div className="flex-1 h-px bg-blue-500/30"></div>
-                                                        <span className="px-2 py-0.5 rounded-full bg-blue-500/10 font-medium">本次生成 ({sessionItems.length})</span>
+                                                        <span className="px-2 py-0.5 rounded-full bg-blue-500/10 font-medium">{t('本次生成')} ({sessionItems.length})</span>
                                                         <div className="flex-1 h-px bg-blue-500/30"></div>
                                                     </div>
                                                     {sessionItems.map((item) => (
@@ -27563,6 +27731,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                             key={item.id}
                                                             item={item}
                                                             theme={theme}
+                                                            language={language}
                                                             lightboxItem={lightboxItem}
                                                             performanceMode={performanceMode}
                                                             providers={providers}
@@ -27646,7 +27815,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                 <>
                                                     <div className={`flex items-center gap-2 text-[10px] ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-400'}`}>
                                                         <div className={`flex-1 h-px ${theme === 'dark' ? 'bg-zinc-700' : 'bg-zinc-300'}`}></div>
-                                                        <span className="px-2 py-0.5 font-medium">之前生成 ({previousItems.length})</span>
+                                                        <span className="px-2 py-0.5 font-medium">{t('之前生成')} ({previousItems.length})</span>
                                                         <div className={`flex-1 h-px ${theme === 'dark' ? 'bg-zinc-700' : 'bg-zinc-300'}`}></div>
                                                     </div>
                                                     {previousItems.map((item) => (
@@ -27654,6 +27823,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                             key={item.id}
                                                             item={item}
                                                             theme={theme}
+                                                            language={language}
                                                             lightboxItem={lightboxItem}
                                                             performanceMode={performanceMode}
                                                             providers={providers}
@@ -27758,7 +27928,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                     className={`font-bold text-xs ${theme === 'dark' ? 'text-zinc-300' : 'text-zinc-700'
                                         }`}
                                 >
-                                    Sora 角色库
+                                    {t('Sora 角色库')}
                                 </h3>
                                 <div className="flex items-center gap-2">
                                     <button
@@ -27779,7 +27949,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                             : 'bg-blue-500 hover:bg-blue-600 text-white'
                                             }`}
                                     >
-                                        新建角色
+                                        {t('新建角色')}
                                     </button>
                                     <button onClick={() => setCharactersOpen(false)}>
                                         <X
@@ -27895,7 +28065,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                     }`}>
                                     <h3 className={`font-bold text-sm ${theme === 'dark' ? 'text-zinc-300' : 'text-zinc-700'
                                         }`}>
-                                        新建角色
+                                        {t('新建角色')}
                                     </h3>
                                     <button onClick={() => setCreateCharacterOpen(false)}>
                                         <X size={16} className={theme === 'dark' ? 'text-zinc-500' : 'text-zinc-400'} />
@@ -28035,7 +28205,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                     <div>
                                         <label className={`block text-xs mb-2 ${theme === 'dark' ? 'text-zinc-300' : 'text-zinc-700'
                                             }`}>
-                                            时间范围（秒，间隔需在 1-3 秒之间）
+                                            {t('时间范围（秒，间隔需在 1-3 秒之间）')}
                                         </label>
                                         <div className="flex gap-2 items-center">
                                             <input
@@ -28829,7 +28999,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                     }`}
                                                 onClick={sendHistoryToChat}
                                             >
-                                                <MessageSquare size={14} className="text-purple-500" /> 发送到对话
+                                                <MessageSquare size={14} className="text-purple-500" /> {t('发送到对话')}
                                             </button>
                                             <button
                                                 className={`w-full whitespace-nowrap text-left px-3 py-2 text-xs flex items-center gap-2 transition-colors ${theme === 'dark'
@@ -28847,7 +29017,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                     }`}
                                                 onClick={sendHistoryToCanvas}
                                             >
-                                                <CopyPlus size={14} className="text-blue-500" /> 发送到画布
+                                                <CopyPlus size={14} className="text-blue-500" /> {t('发送到画布')}
                                             </button>
                                         </div>
                                     )}
@@ -28960,7 +29130,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                         }`}
                                     onClick={sendFrameToCanvas}
                                 >
-                                    <CopyPlus size={14} className="text-blue-500" /> 发送到画布
+                                    <CopyPlus size={14} className="text-blue-500" /> {t('发送到画布')}
                                 </button>
                                 <button
                                     className={`w-full text-left px-3 py-2 text-xs flex items-center gap-2 transition-colors ${theme === 'dark'
@@ -29012,7 +29182,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                         }`}
                                     onClick={sendPreviewToCanvas}
                                 >
-                                    <CopyPlus size={14} className="text-blue-500" /> 发送到画布
+                                    <CopyPlus size={14} className="text-blue-500" /> {t('发送到画布')}
                                 </button>
                                 {/* V3.7.27: 预览原图选项 */}
                                 <button
@@ -29279,7 +29449,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                     : 'text-zinc-500 hover:text-zinc-700'
                                             }`}
                                     >
-                                        接口配置
+                                        {t('接口配置')}
                                     </button>
                                     <button
                                         onClick={() => setSettingsTab('library')}
@@ -29296,7 +29466,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                     : 'text-zinc-500 hover:text-zinc-700'
                                             }`}
                                     >
-                                        模型库
+                                        {t('模型库')}
                                     </button>
                                 </div>
                             </div>
@@ -29309,11 +29479,11 @@ ${inputText.substring(0, 15000)} ... (截断)
                                             : 'border-zinc-200 bg-white'
                                         }`}>
                                         <summary className={`cursor-pointer select-none px-3 py-2 text-xs font-medium ${theme === 'dark' ? 'text-zinc-300' : 'text-zinc-700'}`}>
-                                            基础设置
+                                            {t('基础设置')}
                                         </summary>
                                         <div className="px-3 pb-3 pt-2 space-y-4">
                                             <div className="space-y-2">
-                                                <label className={`text-[10px] font-medium uppercase tracking-wider ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-600'}`}>Global API Key（可选，全局默认 Key）</label>
+                                                <label className={`text-[10px] font-medium uppercase tracking-wider ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-600'}`}>{t('全局 API Key（可选，全局默认 Key）')}</label>
                                                 <input
                                                     type="password"
                                                     value={globalApiKey}
@@ -29327,11 +29497,11 @@ ${inputText.substring(0, 15000)} ... (截断)
                                             </div>
 
                                             <div className="border-t pt-3 border-zinc-700/50">
-                                                <label className={`text-[10px] font-medium uppercase tracking-wider ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-600'}`}>实验室功能</label>
+                                                <label className={`text-[10px] font-medium uppercase tracking-wider ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-600'}`}>{t('实验室功能')}</label>
                                                 <div className="grid grid-cols-2 gap-3 mt-2">
                                                     <div>
                                                         <div className="flex items-center justify-between mb-1">
-                                                            <span className={`text-xs ${theme === 'dark' ? 'text-zinc-300' : 'text-zinc-700'}`}>保存资产包（Zip）</span>
+                                                            <span className={`text-xs ${theme === 'dark' ? 'text-zinc-300' : 'text-zinc-700'}`}>{t('保存资产包（Zip）')}</span>
                                                             <button
                                                                 className={`w-10 h-5 rounded-full relative transition-colors ${saveHistoryAssets ? 'bg-blue-600' : theme === 'dark' ? 'bg-zinc-700' : 'bg-zinc-300'}`}
                                                                 onClick={() => setSaveHistoryAssets(prev => !prev)}
@@ -29339,11 +29509,11 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                 <div className={`absolute top-1 w-3 h-3 rounded-full bg-white transition-all ${saveHistoryAssets ? 'left-6' : 'left-1'}`} />
                                                             </button>
                                                         </div>
-                                                        <p className="text-[9px] text-zinc-500">导出时打包历史图片/视频与项目文件，便于离线恢复。</p>
+                                                        <p className="text-[9px] text-zinc-500">{t('导出时打包历史图片/视频与项目文件，便于离线恢复。')}</p>
                                                     </div>
                                                     <div>
                                                         <div className="flex flex-col gap-1">
-                                                            <span className={`text-xs ${theme === 'dark' ? 'text-zinc-300' : 'text-zinc-700'}`}>本地服务地址</span>
+                                                            <span className={`text-xs ${theme === 'dark' ? 'text-zinc-300' : 'text-zinc-700'}`}>{t('本地服务地址')}</span>
                                                             <input
                                                                 type="text"
                                                                 value={localServerUrl}
@@ -29359,23 +29529,59 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                 <span className={`inline-block w-2 h-2 rounded-full ${localCacheEnabled ? (localCacheServerConnected ? 'bg-green-500' : 'bg-red-500') : 'bg-zinc-400'}`} />
                                                                 <span>
                                                                     {localCacheEnabled
-                                                                        ? (localCacheServerConnected ? '本地缓存已连接' : '本地缓存未连接')
-                                                                        : '本地缓存已关闭'}
+                                                                        ? (localCacheServerConnected ? t('本地缓存已连接') : t('本地缓存未连接'))
+                                                                        : t('本地缓存已关闭')}
                                                                 </span>
                                                             </div>
                                                         </div>
-                                                        <p className="text-[9px] text-zinc-500 mt-1">用于连接本地后端服务，支持大文件保存和处理。</p>
+                                                        <p className="text-[9px] text-zinc-500 mt-1">{t('用于连接本地后端服务，支持大文件保存和处理。')}</p>
                                                     </div>
                                                 </div>
                                             </div>
 
                                             <div className="border-t pt-3 border-zinc-700/50 space-y-2">
-                                                <label className={`text-[10px] font-medium uppercase tracking-wider ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-600'}`}>其他设置</label>
+                                                <label className={`text-[10px] font-medium uppercase tracking-wider ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-600'}`}>{t('其他设置')}</label>
                                                 <div className="mb-2">
                                                     <div className="flex items-center justify-between">
                                                         <div className="flex-1">
                                                             <label className={`text-[10px] font-medium uppercase tracking-wider ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-600'}`}>
-                                                                撤销/重做步数
+                                                                {t('界面语言')}
+                                                            </label>
+                                                            <p className={`text-[10px] mt-0.5 ${theme === 'dark' ? 'text-zinc-600' : 'text-zinc-500'}`}>
+                                                                {t('切换中文/英文')}
+                                                            </p>
+                                                        </div>
+                                                        <div className="flex items-center gap-1 ml-3">
+                                                            <button
+                                                                onClick={() => setLanguage('zh')}
+                                                                className={`px-2 py-1 text-[10px] rounded border transition-colors ${language === 'zh'
+                                                                    ? 'bg-blue-600 text-white border-blue-500'
+                                                                    : theme === 'dark'
+                                                                        ? 'bg-zinc-800 text-zinc-400 border-zinc-700 hover:text-zinc-200'
+                                                                        : 'bg-white text-zinc-600 border-zinc-300 hover:text-zinc-800'
+                                                                    }`}
+                                                            >
+                                                                {t('中文')}
+                                                            </button>
+                                                            <button
+                                                                onClick={() => setLanguage('en')}
+                                                                className={`px-2 py-1 text-[10px] rounded border transition-colors ${language === 'en'
+                                                                    ? 'bg-blue-600 text-white border-blue-500'
+                                                                    : theme === 'dark'
+                                                                        ? 'bg-zinc-800 text-zinc-400 border-zinc-700 hover:text-zinc-200'
+                                                                        : 'bg-white text-zinc-600 border-zinc-300 hover:text-zinc-800'
+                                                                    }`}
+                                                            >
+                                                                {t('英文')}
+                                                            </button>
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                                <div className="mb-2">
+                                                    <div className="flex items-center justify-between">
+                                                        <div className="flex-1">
+                                                            <label className={`text-[10px] font-medium uppercase tracking-wider ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-600'}`}>
+                                                                {t('撤销/重做步数')}
                                                             </label>
                                                             <p className={`text-[10px] mt-0.5 ${theme === 'dark' ? 'text-zinc-600' : 'text-zinc-500'}`}>
                                                                 设置可撤销的最大步数 (粘贴图片、删除节点等操作)
@@ -29406,10 +29612,10 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                     <div className="flex items-center justify-between">
                                                         <div className="flex-1">
                                                             <label className={`text-[10px] font-medium uppercase tracking-wider ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-600'}`}>
-                                                                即梦图生图使用本地文件
+                                                                {t('即梦图生图使用本地文件')}
                                                             </label>
                                                             <p className={`text-[10px] mt-0.5 ${theme === 'dark' ? 'text-zinc-600' : 'text-zinc-500'}`}>
-                                                                启用后，即梦模型的图生图功能将强制使用本地文件（FormData），URL图片会自动下载转换为本地文件
+                                                                {t('启用后，即梦模型的图生图功能将强制使用本地文件（FormData），URL图片会自动下载转换为本地文件')}
                                                             </p>
                                                         </div>
                                                         <label className="relative inline-flex items-center cursor-pointer ml-3">
@@ -29443,7 +29649,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                             : 'border-zinc-200 bg-white'
                                         }`}>
                                         <div className="px-3 py-3">
-                                            <label className={`text-[10px] font-medium uppercase tracking-wider ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-600'}`}>API 配置备份</label>
+                                            <label className={`text-[10px] font-medium uppercase tracking-wider ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-600'}`}>{t('API 配置备份')}</label>
                                             <div className="flex gap-2 mt-2">
                                                 <button
                                                     onClick={() => {
@@ -29477,7 +29683,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                         }`}
                                                 >
                                                     <Download size={14} />
-                                                    导出 API Keys
+                                                    {t('导出 API Keys')}
                                                 </button>
                                                 <button
                                                     onClick={() => {
@@ -29525,7 +29731,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                             customParams: normalizeCustomParams(entry.customParams),
                                                                             previewOverrideEnabled: !!entry.previewOverrideEnabled,
                                                                             previewOverridePatch: normalizePreviewOverridePatch(entry.previewOverridePatch),
-                                                                            requestTemplate: normalizeRequestTemplate(entry.requestTemplate || getDefaultRequestTemplateForType(entry.type || 'Chat')),
+                                                                            requestTemplate: normalizeRequestTemplate(entry.requestTemplate || getDefaultRequestTemplateForEntry(entry)),
                                                                             requestOverrideEnabled: !!entry.requestOverrideEnabled,
                                                                             requestOverridePatch: normalizeRequestOverridePatch(entry.requestOverridePatch)
                                                                         }))
@@ -29574,10 +29780,10 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                         }`}
                                                 >
                                                     <FolderOpen size={14} />
-                                                    导入 API Keys
+                                                    {t('导入 API Keys')}
                                                 </button>
                                             </div>
-                                            <p className="text-[9px] text-zinc-500 mt-1">导出包含：全局 Key、Provider 配置、模型库、所有模型配置（含 Key）</p>
+                                            <p className="text-[9px] text-zinc-500 mt-1">{t('导出包含：全局 Key、Provider 配置、模型库、所有模型配置（含 Key）')}</p>
                                         </div>
                                     </div>
 
@@ -29588,7 +29794,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                             : 'border-zinc-200 bg-white'
                                         }`}>
                                         <div className="px-3 py-3">
-                                            <label className={`text-[10px] font-medium uppercase tracking-wider ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-600'}`}>API 运行状态管理</label>
+                                            <label className={`text-[10px] font-medium uppercase tracking-wider ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-600'}`}>{t('API 运行状态管理')}</label>
                                             <div className="grid grid-cols-3 gap-2 mt-2">
                                                 <button
                                                     onClick={() => {
@@ -29600,7 +29806,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                         ? 'bg-red-600/20 text-red-400 hover:bg-red-600/30 border border-red-500/30'
                                                         : 'bg-red-50 text-red-600 hover:bg-red-100 border border-red-200'}`}
                                                 >
-                                                    <Ban size={12} />清空黑名单
+                                                    <Ban size={12} />{t('清空黑名单')}
                                                     {Object.keys(apiBlacklist).length > 0 && <span className="ml-1 px-1 rounded bg-red-500/30 text-[9px]">{Object.keys(apiBlacklist).length}</span>}
                                                 </button>
                                                 <button
@@ -29612,7 +29818,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                         ? 'bg-amber-600/20 text-amber-400 hover:bg-amber-600/30 border border-amber-500/30'
                                                         : 'bg-amber-50 text-amber-600 hover:bg-amber-100 border border-amber-200'}`}
                                                 >
-                                                    <Clock size={12} />清空暂停
+                                                    <Clock size={12} />{t('清空暂停')}
                                                     {Object.keys(apiSuspendList).length > 0 && <span className="ml-1 px-1 rounded bg-amber-500/30 text-[9px]">{Object.keys(apiSuspendList).length}</span>}
                                                 </button>
                                                 <button
@@ -29624,10 +29830,10 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                         ? 'bg-blue-600/20 text-blue-400 hover:bg-blue-600/30 border border-blue-500/30'
                                                         : 'bg-blue-50 text-blue-600 hover:bg-blue-100 border border-blue-200'}`}
                                                 >
-                                                    <Zap size={12} />重置熔断
+                                                    <Zap size={12} />{t('重置熔断')}
                                                 </button>
                                             </div>
-                                            <p className="text-[9px] text-zinc-500 mt-1">黑名单 = 积分耗尽，暂停 = 临时错误（60分钟后自动恢复），熔断 = 短时大量1006错误保护</p>
+                                            <p className="text-[9px] text-zinc-500 mt-1">{t('黑名单 = 积分耗尽，暂停 = 临时错误（60分钟后自动恢复），熔断 = 短时大量1006错误保护')}</p>
                                         </div>
                                     </div>
 
@@ -29638,11 +29844,11 @@ ${inputText.substring(0, 15000)} ... (截断)
                                             : 'border-zinc-200 bg-white'
                                         }`}>
                                         <div className={`px-3 py-2 text-xs font-medium ${theme === 'dark' ? 'text-zinc-300' : 'text-zinc-700'}`}>
-                                            接口与模型列表
+                                            {t('接口与模型列表')}
                                         </div>
                                         <div className="px-3 pb-3 pt-2">
                             <div className="flex justify-between items-center mb-2">
-                                <span className={`text-xs ${theme === 'dark' ? 'text-zinc-400' : 'text-zinc-500'}`}>管理您的第三方模型接口。</span>
+                                <span className={`text-xs ${theme === 'dark' ? 'text-zinc-400' : 'text-zinc-500'}`}>{t('管理您的第三方模型接口。')}</span>
                                 <div className="flex items-center gap-2">
                                     <button
                                         onClick={() => {
@@ -29666,7 +29872,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                         setProviders(prev => ({ ...prev, [newKey]: normalizeProviderConfig(newKey, { key: '', url: '', enabled: true }) }));
                                         setExpandedProviders(prev => ({ ...prev, [newKey]: true }));
                                         setEditingProvider({ key: newKey, tempName: newName });
-                                    }}><Plus size={14} className="mr-1" /> 添加供应商</Button>
+                                    }}><Plus size={14} className="mr-1" /> {t('添加供应商')}</Button>
                                 </div>
                             </div>
                                     <div className="space-y-2 max-h-[50vh] overflow-y-auto custom-scrollbar pr-1">
@@ -29803,7 +30009,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                 {/* Provider 级别设置 */}
                                                 <div className="pt-3 pb-2 space-y-2">
                                                     <div className="grid grid-cols-4 items-center gap-2">
-                                                        <label className={`text-[10px] font-medium uppercase tracking-wider text-right ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-600'}`}>接口类型</label>
+                                                        <label className={`text-[10px] font-medium uppercase tracking-wider text-right ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-600'}`}>{t('接口类型')}</label>
                                                         <select
                                                             value={providers[providerKey]?.apiType || 'openai'}
                                                             onChange={(e) => setProviders(prev => ({ ...prev, [providerKey]: { ...prev[providerKey], apiType: e.target.value } }))}
@@ -29815,7 +30021,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                         </select>
                                                     </div>
                                                     <div className="grid grid-cols-4 items-center gap-2">
-                                                        <label className={`text-[10px] font-medium uppercase tracking-wider text-right ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-600'}`}>本地代理</label>
+                                                        <label className={`text-[10px] font-medium uppercase tracking-wider text-right ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-600'}`}>{t('本地代理')}</label>
                                                         <div className="col-span-3 flex items-center gap-2">
                                                             <label className="relative inline-flex items-center cursor-pointer">
                                                                 <input
@@ -29835,7 +30041,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                         </div>
                                                     </div>
                                                     <div className="grid grid-cols-4 items-center gap-2">
-                                                        <label className={`text-[10px] font-medium uppercase tracking-wider text-right ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-600'}`}>异步模式</label>
+                                                        <label className={`text-[10px] font-medium uppercase tracking-wider text-right ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-600'}`}>{t('异步模式')}</label>
                                                         <div className="col-span-3 flex items-center gap-2">
                                                             <label className="relative inline-flex items-center cursor-pointer">
                                                                 <input
@@ -29851,7 +30057,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                         : 'bg-zinc-300'
                                                                     } peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all`}></div>
                                                             </label>
-                                                            <span className={`text-[9px] ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-600'}`}>ModelScope 建议开启</span>
+                                                            <span className={`text-[9px] ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-600'}`}>{t('ModelScope 建议开启')}</span>
                                                         </div>
                                                     </div>
                                                     <div className="grid grid-cols-4 items-center gap-2">
@@ -29880,7 +30086,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                 <div className={`mt-2 pt-2 border-t ${theme === 'dark' ? 'border-zinc-800/50' : 'border-zinc-200'}`}>
 
                                                     <div className="flex items-center justify-between mb-2">
-                                                        <div className={`text-[10px] font-medium uppercase tracking-wider ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-600'}`}>模型</div>
+                                                        <div className={`text-[10px] font-medium uppercase tracking-wider ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-600'}`}>{t('模型')}</div>
                                                         <button
                                                             onClick={() => {
                                                                 const newId = `${providerKey}-${Date.now()}`;
@@ -29895,7 +30101,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                             }}
                                                             className={`text-[9px] px-1.5 py-0.5 rounded flex items-center gap-1 ${theme === 'dark' ? 'bg-zinc-800 text-zinc-400 hover:bg-zinc-700' : 'bg-zinc-200 text-zinc-600 hover:bg-zinc-300'}`}
                                                         >
-                                                            <Plus size={10} /> 添加模型
+                                                            <Plus size={10} /> {t('添加模型')}
                                                         </button>
                                                     </div>
                                                     <div className="space-y-1.5">
@@ -30062,7 +30268,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                             const videoResolutionNotes = entry.videoResolutionNotes || {};
                                             const videoResolutionNotesEnabled = !!entry.videoResolutionNotesEnabled;
                                             const customParams = Array.isArray(entry.customParams) ? entry.customParams : [];
-                                            const requestTemplateValue = normalizeRequestTemplate(entry.requestTemplate || getDefaultRequestTemplateForType(entry.type || 'Chat'));
+                                            const requestTemplateValue = normalizeRequestTemplate(entry.requestTemplate || getDefaultRequestTemplateForEntry(entry));
                                             const requestTemplateEnabled = requestTemplateValue?.enabled !== false;
                                             const requestOverridePatch = normalizeRequestOverridePatch(entry.requestOverridePatch);
                                             const previewBase = {
@@ -30137,7 +30343,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                             };
                                             const updateRequestTemplate = (updates) => {
                                                 const nextTemplate = normalizeRequestTemplate({
-                                                    ...(requestTemplateValue || getDefaultRequestTemplateForType(entry.type || 'Chat')),
+                                                    ...(requestTemplateValue || getDefaultRequestTemplateForEntry(entry)),
                                                     ...updates
                                                 });
                                                 updateModelLibraryEntry(entry.id, { requestTemplate: nextTemplate });
@@ -30823,6 +31029,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                                 : 'bg-white border-zinc-300 text-zinc-900'
                                                                                 }`}
                                                                         >
+                                                                            <option value="auto">{t('自动')}</option>
                                                                             <option value="json">json</option>
                                                                             <option value="multipart">multipart</option>
                                                                             <option value="raw">raw</option>
@@ -30991,11 +31198,11 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                                 : 'bg-zinc-200 text-zinc-700 hover:bg-zinc-300'
                                                                                 } ${!isEditing ? 'opacity-60 cursor-not-allowed' : ''}`}
                                                                         >
-                                                                            保存模板
+                                                                            {t('保存模板')}
                                                                         </button>
                                                                         <button
                                                                             onClick={() => {
-                                                                                updateModelLibraryEntry(entry.id, { requestTemplate: getDefaultRequestTemplateForType(entry.type || 'Chat') });
+                                                                                updateModelLibraryEntry(entry.id, { requestTemplate: getDefaultRequestTemplateForEntry(entry) });
                                                                                 setLibraryRequestTemplateDrafts(prev => {
                                                                                     const { [entry.id]: _removed, ...rest } = prev;
                                                                                     return rest;
@@ -31007,7 +31214,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                                 : 'bg-zinc-100 text-zinc-500 hover:bg-zinc-200'
                                                                                 } ${!isEditing ? 'opacity-60 cursor-not-allowed' : ''}`}
                                                                         >
-                                                                            重置
+                                                                            {t('重置')}
                                                                         </button>
                                                                     </div>
                                                                 </div>
@@ -31099,7 +31306,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                                         : 'bg-zinc-200 text-zinc-700 hover:bg-zinc-300'
                                                                                         }`}
                                                                                 >
-                                                                                    保存
+                                                                                    {t('保存')}
                                                                                 </button>
                                                                                 <button
                                                                                     onClick={() => {
@@ -31216,7 +31423,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                                             : 'bg-zinc-200 text-zinc-700 hover:bg-zinc-300'
                                                                                             }`}
                                                                                     >
-                                                                                        保存
+                                                                                        {t('保存')}
                                                                                     </button>
                                                                                     <button
                                                                                         onClick={() => {
@@ -31286,7 +31493,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                         <div className="flex items-center gap-4">
                                             <h2 className={`text-lg font-bold ${theme === 'dark' ? 'text-zinc-100' : 'text-zinc-900'
                                                 }`}>
-                                                批量素材管理
+                                                {t('批量素材管理')}
                                             </h2>
                                             <span className={`text-sm ${theme === 'dark' ? 'text-zinc-400' : 'text-zinc-600'
                                                 }`}>
@@ -31335,7 +31542,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                     }`}
                                             >
                                                 <Trash2 size={14} />
-                                                批量删除
+                                                {t('批量删除')}
                                             </button>
                                             <button
                                                 onClick={async () => {
@@ -31385,7 +31592,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                     }`}
                                             >
                                                 <Trash2 size={14} />
-                                                清理缓存
+                                                {t('清理缓存')}
                                             </button>
                                             <button
                                                 onClick={async () => {
@@ -31443,7 +31650,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                     }`}
                                             >
                                                 <ArrowRightSquare size={14} />
-                                                发送到画布
+                                                {t('发送到画布')}
                                             </button>
                                             <button
                                                 onClick={() => {
