@@ -328,6 +328,14 @@ def is_video_file(filename):
     ext = os.path.splitext(filename)[1].lower()
     return ext in ['.mp4', '.mov', '.webm', '.avi', '.mkv']
 
+def read_json_file(path):
+    try:
+        with open(path, 'r', encoding='utf-8-sig') as f:
+            return json.load(f)
+    except Exception:
+        with open(path, 'r', encoding='utf-8') as f:
+            return json.load(f)
+
 # ==============================================================================
 # SECTION 3: ComfyUI 中间件模块 (Comfy Middleware Module)
 # ==============================================================================
@@ -378,14 +386,12 @@ class ComfyMiddleware:
         if not os.path.exists(template_path):
             raise FileNotFoundError(f"模板不存在: {app_id}")
             
-        with open(template_path, 'r', encoding='utf-8') as f:
-            workflow = json.load(f)
+        workflow = read_json_file(template_path)
             
         params_map = {}
         if os.path.exists(meta_path):
-            with open(meta_path, 'r', encoding='utf-8') as f:
-                meta = json.load(f)
-                params_map = meta.get('params_map', {})
+            meta = read_json_file(meta_path)
+            params_map = meta.get('params_map', {})
                 
         return workflow, params_map
 
