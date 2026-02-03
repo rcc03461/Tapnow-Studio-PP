@@ -5,6 +5,7 @@
 #### 2026-02-03 开发中改动（3.8.4-rc1）
 - **[新增]** 本地 ComfyUI 中间件 v2.3：兼容 BizyAir/RunningHub 接口，补齐 create/detail/outputs。
 - **[新增]** 本地 ComfyUI 测试指引文档（含 BizyAir/RunningHub/Prompt 三种测试路径）。
+- **[新增]** workflows 批处理：单 JSON 自动重命名 template.json 并生成 meta.json。
 
 #### 2026-02-02 已验证（3.8.3）
 - **[新增]** 模型库：单模型导入/导出 + 复制模型快速复用配置。
