@@ -3306,6 +3306,7 @@ const Lightbox = ({ item, onClose, onNavigate, onShotNavigate, onHistoryNavigate
 
             // 防止在输入框中触发
             if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+            if (e.repeat) return;
 
             if (e.key === 'ArrowLeft' || e.key === 'Left') {
                 // 只在有多张图片时响应
@@ -4474,6 +4475,16 @@ function TapnowApp() {
         } catch (e) { }
         return false;
     }, [localServerUrl]);
+    const isComfyLocalUrl = useCallback((url) => {
+        if (!url) return false;
+        try {
+            const parsed = new URL(String(url));
+            const isLocalHost = parsed.hostname === '127.0.0.1' || parsed.hostname === 'localhost';
+            return isLocalHost && parsed.port === '8188';
+        } catch (e) {
+            return false;
+        }
+    }, []);
     const isLocalCacheUrlAvailable = useCallback((url) => {
         if (!url) return false;
         const relPath = extractLocalCacheRelPath(url);
@@ -4679,6 +4690,9 @@ function TapnowApp() {
             if (resolved && resolved !== value) return resolved;
             const assetFallback = getAssetFallbackUrl(value);
             return assetFallback || value;
+        }
+        if (value.startsWith('data:') && value.includes('...')) {
+            return fallback || '';
         }
         if (value.startsWith('blob:')) {
             return fallback || '';
@@ -5769,13 +5783,14 @@ function TapnowApp() {
         if (raw.startsWith('data:') || raw.startsWith('blob:')) return false;
         const base = (localServerUrl || '').trim();
         if (base && raw.startsWith(base)) return false;
+        if (localCacheActive && isComfyLocalUrl(raw)) return true;
         if (localCacheActive && historyLocalCacheMap.has(raw)) {
             const cached = historyLocalCacheMap.get(raw);
             if (cached && isLocalCacheUrlAvailable(cached)) return false;
         }
         if (historyUrlProxyMap.has(raw)) return !!historyUrlProxyMap.get(raw);
         return !!fallback;
-    }, [historyUrlProxyMap, historyLocalCacheMap, localServerUrl, localCacheActive, isLocalCacheUrlAvailable]);
+    }, [historyUrlProxyMap, historyLocalCacheMap, localServerUrl, localCacheActive, isLocalCacheUrlAvailable, isComfyLocalUrl]);
 
     useEffect(() => {
         const nextPath = {
@@ -5865,6 +5880,10 @@ function TapnowApp() {
                 const fallback = getHistoryFallbackUrl(item, { allowLocalCache: false });
                 return normalizeHistoryUrl(fallback || '');
             }
+            if (localCacheActive && isComfyLocalUrl(normalized)) {
+                const base = (localServerUrl || '').trim().replace(/\/+$/, '');
+                if (base) return `${base}/proxy?url=${encodeURIComponent(normalized)}`;
+            }
             return normalizeHistoryUrl(normalized);
         }
         const cacheUrl = localCacheActive
@@ -5875,7 +5894,7 @@ function TapnowApp() {
         }
         const fallback = getHistoryFallbackUrl(item, { allowLocalCache: localCacheActive });
         return normalizeHistoryUrl(fallback || '');
-    }, [localCacheActive, historyLocalCacheMap, isLocalCacheUrlAvailable, localCacheIndexTick, sanitizeHistoryUrlValue, getHistoryFallbackUrl, isLocalCacheUrl]);
+    }, [localCacheActive, historyLocalCacheMap, isLocalCacheUrlAvailable, localCacheIndexTick, sanitizeHistoryUrlValue, getHistoryFallbackUrl, isLocalCacheUrl, isComfyLocalUrl, localServerUrl]);
 
     const resolveHistoryPreviewUrl = useCallback((item, specificUrl = null) => {
         if (!item) return '';
@@ -5905,6 +5924,10 @@ function TapnowApp() {
                     || sanitizeHistoryUrlValue(item.thumbnailUrl, '', { allowLocalCache: false });
                 return normalizeHistoryUrl(fallback || '');
             }
+            if (localCacheActive && isComfyLocalUrl(normalized)) {
+                const base = (localServerUrl || '').trim().replace(/\/+$/, '');
+                if (base) return `${base}/proxy?url=${encodeURIComponent(normalized)}`;
+            }
             return normalizeHistoryUrl(normalized);
         }
         const cacheUrl = localCacheActive
@@ -5923,7 +5946,7 @@ function TapnowApp() {
         const fallback = sanitizeHistoryUrlValue(item.thumbnailUrl, '', { allowLocalCache: localCacheActive })
             || getHistoryFallbackUrl(item, { allowLocalCache: localCacheActive });
         return normalizeHistoryUrl(fallback || '');
-    }, [localCacheActive, performanceMode, historyLocalCacheMap, isLocalCacheUrlAvailable, localCacheIndexTick, sanitizeHistoryUrlValue, getHistoryFallbackUrl, isLocalCacheUrl]);
+    }, [localCacheActive, performanceMode, historyLocalCacheMap, isLocalCacheUrlAvailable, localCacheIndexTick, sanitizeHistoryUrlValue, getHistoryFallbackUrl, isLocalCacheUrl, isComfyLocalUrl, localServerUrl]);
 
     const getHistoryMultiImages = useCallback((item) => {
         if (!item) return null;
@@ -12141,8 +12164,15 @@ function TapnowApp() {
                         const outputsText = await outputsResp.text();
                         outputsData = outputsText ? JSON.parse(outputsText) : {};
                     }
-                    const outputsValue = asyncConfig.outputsPath ? getValueByPath(outputsData, asyncConfig.outputsPath) : outputsData;
-                    const imageUrls = extractAsyncOutputUrls(outputsValue, asyncConfig.outputsUrlField);
+                    let outputsValue = asyncConfig.outputsPath ? getValueByPath(outputsData, asyncConfig.outputsPath) : outputsData;
+                    let imageUrls = extractAsyncOutputUrls(outputsValue, asyncConfig.outputsUrlField);
+                    if (imageUrls.length === 0) {
+                        const fallbackOutputs = getValueByPathAny(outputsData, ['data.outputs', 'outputs', 'data.images', 'images']);
+                        if (fallbackOutputs && fallbackOutputs !== outputsValue) {
+                            outputsValue = fallbackOutputs;
+                            imageUrls = extractAsyncOutputUrls(outputsValue, asyncConfig.outputsUrlField);
+                        }
+                    }
 
                     if (imageUrls.length === 0) {
                         throw new Error('异步任务未返回结果');
@@ -13792,6 +13822,21 @@ function TapnowApp() {
                         ));
                         pollAsyncTask(taskId, requestId, asyncConfig, asyncVars, w, h, actualSourceNodeId, providerKey, 0);
                         return;
+                    }
+                }
+                if (!asyncConfig?.enabled && baseUrl && (String(baseUrl).includes('127.0.0.1:9527') || String(baseUrl).includes('localhost:9527'))) {
+                    const requestId = getValueByPathAny(data, ['requestId', 'request_id', 'data.requestId', 'data.request_id', 'taskId', 'task_id', 'job_id']);
+                    if (requestId) {
+                        const fallbackConfig = normalizeAsyncConfig(ASYNC_CONFIG_TEMPLATE);
+                        if (fallbackConfig) {
+                            const asyncVars = buildAsyncTemplateVars();
+                            asyncVars.requestId = requestId;
+                            setHistory((prev) => prev.map((hItem) =>
+                                hItem.id === taskId ? { ...hItem, status: 'generating', progress: 10, remoteTaskId: requestId } : hItem
+                            ));
+                            pollAsyncTask(taskId, requestId, fallbackConfig, asyncVars, w, h, actualSourceNodeId, providerKey, 0);
+                            return;
+                        }
                     }
                 }
 
@@ -20328,9 +20373,10 @@ ${inputText.substring(0, 15000)} ... (截断)
         const zip = new JSZip();
         let count = 0;
         const totalItems = items.length;
+        const totalSteps = totalItems + 1; // +1 for ZIP packaging
 
         // V3.5.12: Set download progress for visible progress bar
-        setDownloadProgress({ active: true, current: 0, total: totalItems });
+        setDownloadProgress({ active: true, current: 0, total: totalSteps });
 
         try {
             for (const item of items) {
@@ -20394,6 +20440,7 @@ ${inputText.substring(0, 15000)} ... (截断)
             }
 
             const content = await zip.generateAsync({ type: 'blob' });
+            setDownloadProgress(prev => ({ ...prev, current: totalSteps }));
             const now = new Date();
             const timestamp = `${now.getFullYear().toString().slice(2)}${(now.getMonth() + 1).toString().padStart(2, '0')}${now.getDate().toString().padStart(2, '0')}-${now.getHours().toString().padStart(2, '0')}${now.getMinutes().toString().padStart(2, '0')}`;
             saveAs(content, `tapnow-assets-${timestamp}.zip`);
@@ -24463,7 +24510,8 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                 model: sourceSettings.model || shot.model,
                                                                 ratio: sourceSettings.ratio || shot.ratio,
                                                                 resolution: sourceSettings.resolution || shot.resolution,
-                                                                duration: sourceSettings.duration || shot.duration
+                                                                duration: sourceSettings.duration || shot.duration,
+                                                                customParams: sourceSettings.customParams || shot.customParams
                                                             }));
                                                             updateNodeSettings(node.id, { shots: syncedShots });
                                                             // V3.7.29: 显示同步参数 Toast
@@ -24887,11 +24935,19 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                             onClick={(e) => {
                                                                 e.stopPropagation();
                                                                 const shots = node.settings?.shots || [];
-                                                                const anySelected = shots.some(s => s.selectedImageIndex >= 0);
+                                                                const hasSelectable = shots.some(s => (Array.isArray(s.output_images) && s.output_images.length > 0) || s.output_url);
+                                                                const anySelected = shots.some(s => s.selectedImageIndex >= 0 && ((Array.isArray(s.output_images) && s.output_images.length > 0) || s.output_url));
+                                                                const shouldSelect = hasSelectable && !anySelected;
                                                                 updateNodeSettings(node.id, {
                                                                     shots: shots.map(s => ({
                                                                         ...s,
-                                                                        selectedImageIndex: s.outputEnabled ? s.selectedImageIndex : (anySelected ? -1 : 0)
+                                                                        selectedImageIndex: s.outputEnabled
+                                                                            ? s.selectedImageIndex
+                                                                            : (shouldSelect
+                                                                                ? (((Array.isArray(s.output_images) && s.output_images.length > 0) || s.output_url)
+                                                                                    ? (Number.isInteger(s.selectedImageIndex) && s.selectedImageIndex >= 0 ? s.selectedImageIndex : 0)
+                                                                                    : -1)
+                                                                                : -1)
                                                                     }))
                                                                 });
                                                             }}
