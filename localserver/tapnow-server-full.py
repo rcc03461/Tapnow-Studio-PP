@@ -85,7 +85,8 @@ DEFAULT_PROXY_ALLOWED_HOSTS = [
     "api.openai.com", "generativelanguage.googleapis.com", 
     "ai.comfly.chat", "api-inference.modelscope.cn", 
     "vibecodingapi.ai", "yunwu.ai", 
-    "muse-ai.oss-cn-hangzhou.aliyuncs.com", "googlecdn.datas.systems"
+    "muse-ai.oss-cn-hangzhou.aliyuncs.com", "googlecdn.datas.systems",
+    "127.0.0.1:8188", "localhost:8188"
 ]
 DEFAULT_PROXY_TIMEOUT = 300
 CONFIG_FILENAME = "tapnow-local-config.json"
@@ -261,13 +262,16 @@ def parse_allowed_host_entry(entry):
 
 def is_proxy_target_allowed(target_url):
     allowed_hosts = config.get("proxy_allowed_hosts", [])
-    if not allowed_hosts:
-        return False
     parsed = urlparse(target_url)
     if parsed.scheme not in ('http', 'https') or not parsed.hostname:
         return False
     host = parsed.hostname.lower()
     port = parsed.port or (443 if parsed.scheme == 'https' else 80)
+    # Always allow local ComfyUI output fetch (avoid 403 loop)
+    if host in ('127.0.0.1', 'localhost') and port == 8188:
+        return True
+    if not allowed_hosts:
+        return False
     for entry in allowed_hosts:
         if entry is None:
             continue

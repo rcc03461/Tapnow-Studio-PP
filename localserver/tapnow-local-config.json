@@ -11,7 +11,9 @@
         "api-inference.modelscope.cn",
         "yunwu.ai",
         "muse-ai.oss-cn-hangzhou.aliyuncs.com",
-        "googlecdn.datas.systems"
+        "googlecdn.datas.systems",
+        "127.0.0.1:8188",
+        "localhost:8188"
     ],
     "proxy_timeout": 300,
     "features": {
