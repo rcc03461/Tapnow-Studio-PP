@@ -842,6 +842,7 @@ const HistoryItem = memo(({
     })();
     const displayModelName = truncateByBytes(rawModelName, 15);
     const providerTitle = item.provider || item.apiConfig?.provider || '';
+    const modelTooltip = providerTitle ? `${providerTitle} / ${rawModelName}` : rawModelName;
     const getDisplayUrl = (originalUrl) => {
         if (hasLocalCache) return localCacheFallback;
         if (performanceMode !== 'off' && thumbnailUrl) return thumbnailUrl;
@@ -1146,7 +1147,7 @@ const HistoryItem = memo(({
 
                     {/* 第四行 - 时间·模型·用时 */}
                     <span className={theme === 'dark' ? 'text-zinc-500' : theme === 'solarized' ? 'text-black' : 'text-zinc-400'}>
-                        {item.time} · <span title={providerTitle || rawModelName}>{displayModelName}</span>
+                        {item.time} · <span title={modelTooltip}>{displayModelName}</span>
                         {typeof item.durationMs === 'number' && item.durationMs > 0 && (
                             <> · {t('用时')} {(item.durationMs / 1000).toFixed(1)}s</>
                         )}
@@ -3452,7 +3453,7 @@ const Lightbox = ({ item, onClose, onNavigate, onShotNavigate, onHistoryNavigate
     // 使用ref存储最新的item值，避免闭包问题
     const itemRef = useRef(item);
     const overlayRef = useRef(null);
-    const navGuardRef = useRef({ lastAt: 0, lastHistoryAt: 0, lastShotAt: 0, activeKey: null });
+    const navGuardRef = useRef({ lastAt: 0, lastHistoryAt: 0, lastShotAt: 0, activeKey: null, cooldownUntil: 0 });
     const onNavigateRef = useRef(onNavigate);
     const onShotNavigateRef = useRef(onShotNavigate);
     const onHistoryNavigateRef = useRef(onHistoryNavigate);
@@ -3541,18 +3542,20 @@ const Lightbox = ({ item, onClose, onNavigate, onShotNavigate, onHistoryNavigate
 
             // 防止在输入框中触发
             if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
-            if (overlayRef.current && document.activeElement && !overlayRef.current.contains(document.activeElement)) {
-                return;
-            }
+            // Lightbox 打开时允许全局键盘导航（仅屏蔽输入框/可编辑区域）
             if (e.repeat) return;
+            const guard = navGuardRef.current;
+            const now = Date.now();
+            if (guard.activeKey && now - guard.lastAt > 800) {
+                guard.activeKey = null;
+            }
             const normalizedKey = normalizeNavKey(e.key);
             const navKeys = ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'];
             if (navKeys.includes(normalizedKey)) {
-                const guard = navGuardRef.current;
                 if (guard.activeKey && guard.activeKey === normalizedKey) return;
                 if (guard.activeKey && guard.activeKey !== normalizedKey) return;
                 guard.activeKey = normalizedKey;
-                guard.lastAt = Date.now();
+                guard.lastAt = now;
             }
 
             if (normalizedKey === 'ArrowLeft') {
@@ -3596,9 +3599,10 @@ const Lightbox = ({ item, onClose, onNavigate, onShotNavigate, onHistoryNavigate
                 e.preventDefault();
                 e.stopPropagation();
                 const guard = navGuardRef.current;
-                const now = Date.now();
-                if (now - guard.lastShotAt < 220) return;
+                if (now < guard.cooldownUntil) return;
+                if (now - guard.lastShotAt < 320) return;
                 guard.lastShotAt = now;
+                guard.cooldownUntil = now + 300;
                 const handleShotNavigate = onShotNavigateRef.current;
                 if (currentItem.storyboardContext && handleShotNavigate) {
                     const { shotIndex, allShots } = currentItem.storyboardContext;
@@ -3609,8 +3613,10 @@ const Lightbox = ({ item, onClose, onNavigate, onShotNavigate, onHistoryNavigate
                 } else if (onHistoryNavigateRef.current) {
                     // V3.7.29: 历史项导航（向上 = 更早的项目）
                     if (!currentItem?.id) return;
-                    if (now - guard.lastHistoryAt < 220) return;
+                    if (now < guard.cooldownUntil) return;
+                    if (now - guard.lastHistoryAt < 320) return;
                     guard.lastHistoryAt = now;
+                    guard.cooldownUntil = now + 300;
                     logLightbox('history_up');
                     onHistoryNavigateRef.current(-1);
                 }
@@ -3619,9 +3625,10 @@ const Lightbox = ({ item, onClose, onNavigate, onShotNavigate, onHistoryNavigate
                 e.preventDefault();
                 e.stopPropagation();
                 const guard = navGuardRef.current;
-                const now = Date.now();
-                if (now - guard.lastShotAt < 220) return;
+                if (now < guard.cooldownUntil) return;
+                if (now - guard.lastShotAt < 320) return;
                 guard.lastShotAt = now;
+                guard.cooldownUntil = now + 300;
                 const handleShotNavigate = onShotNavigateRef.current;
                 if (currentItem.storyboardContext && handleShotNavigate) {
                     const { shotIndex, allShots } = currentItem.storyboardContext;
@@ -3632,8 +3639,10 @@ const Lightbox = ({ item, onClose, onNavigate, onShotNavigate, onHistoryNavigate
                 } else if (onHistoryNavigateRef.current) {
                     // V3.7.29: 历史项导航（向下 = 更新的项目）
                     if (!currentItem?.id) return;
-                    if (now - guard.lastHistoryAt < 220) return;
+                    if (now < guard.cooldownUntil) return;
+                    if (now - guard.lastHistoryAt < 320) return;
                     guard.lastHistoryAt = now;
+                    guard.cooldownUntil = now + 300;
                     logLightbox('history_down');
                     onHistoryNavigateRef.current(1);
                 }
@@ -7055,6 +7064,36 @@ function TapnowApp() {
         () => historyDisplayItems.filter(isHistoryItemNavigable),
         [historyDisplayItems, isHistoryItemNavigable]
     );
+    const getHistoryNavAnchorIndex = useCallback((currentItem, items) => {
+        if (!items || items.length === 0) return -1;
+        const currentId = currentItem?.id;
+        if (currentId) {
+            const idxById = items.findIndex(item => item?.id === currentId);
+            if (idxById >= 0) return idxById;
+        }
+        const currentTimeRaw = currentItem?.startTime || currentItem?.created || currentItem?.timestamp;
+        const currentTime = Number.isFinite(currentTimeRaw) ? currentTimeRaw : Number.parseFloat(currentTimeRaw);
+        if (Number.isFinite(currentTime)) {
+            let bestIdx = -1;
+            let bestDiff = Infinity;
+            items.forEach((item, idx) => {
+                const itemTimeRaw = item?.startTime || item?.created || item?.timestamp;
+                const itemTime = Number.isFinite(itemTimeRaw) ? itemTimeRaw : Number.parseFloat(itemTimeRaw);
+                if (!Number.isFinite(itemTime)) return;
+                const diff = Math.abs(itemTime - currentTime);
+                if (diff < bestDiff) {
+                    bestDiff = diff;
+                    bestIdx = idx;
+                }
+            });
+            if (bestIdx >= 0) return bestIdx;
+        }
+        if (historyFocusId) {
+            const idxByFocus = items.findIndex(item => item?.id === historyFocusId);
+            if (idxByFocus >= 0) return idxByFocus;
+        }
+        return 0;
+    }, [historyFocusId]);
     const getHistoryNavIndexById = useCallback((id) => {
         if (!id) return -1;
         return historyNavItems.findIndex(item => item?.id === id);
@@ -28010,7 +28049,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                     >
                                         <div className="relative flex-1 min-w-0">
                                             <button
-                                                title={getApiConfigByKey(node.settings?.model)?.provider}
+                                                title={getModelLabelWithProvider(node.settings?.model)}
                                                 onClick={(e) => { e.stopPropagation(); setActiveDropdown(activeDropdown?.type === 'model' ? null : { nodeId: node.id, type: 'model' }); }}
                                                 className={`flex items-center gap-2 pl-1 pr-2 py-1 rounded text-[10px] transition-colors border w-full ${theme === 'dark'
                                                     ? 'bg-zinc-800/50 hover:bg-zinc-800 text-zinc-300 border-zinc-700/50'
@@ -30028,22 +30067,22 @@ ${inputText.substring(0, 15000)} ... (截断)
                                 backgroundImage: (() => {
                                     const mergeThreshold = 0.6;
                                     const mergeScale = view.zoom < mergeThreshold ? 2 : 1;
-                                    const gridSize = Math.max(12, 20 * view.zoom * mergeScale);
+                                    const gridSize = Math.max(12, Math.round(20 * view.zoom * mergeScale));
                                     const dotRadius = Math.max(0.55, Math.min(1.4, gridSize * 0.035));
-                                    const haloRadius = dotRadius + 0.65;
+                                    const haloRadius = dotRadius + 0.45;
                                     const dotColor = theme === 'dark'
-                                        ? 'rgba(212, 212, 216, 0.38)'
+                                        ? 'rgb(96, 96, 104)'
                                         : theme === 'solarized'
-                                            ? 'rgba(36, 36, 39, 0.34)'
-                                            : 'rgba(36, 36, 39, 0.32)';
+                                            ? 'rgb(212, 212, 216)'
+                                            : 'rgb(212, 212, 216)';
                                     const haloColor = theme === 'dark'
-                                        ? 'rgba(212, 212, 216, 0.22)'
+                                        ? 'rgba(96, 96, 104, 0.22)'
                                         : theme === 'solarized'
-                                            ? 'rgba(36, 36, 39, 0.2)'
-                                            : 'rgba(36, 36, 39, 0.2)';
+                                            ? 'rgba(212, 212, 216, 0.16)'
+                                            : 'rgba(212, 212, 216, 0.16)';
                                     return `radial-gradient(${dotColor} ${dotRadius}px, transparent ${dotRadius + 0.2}px), radial-gradient(${haloColor} ${haloRadius}px, transparent ${haloRadius + 0.2}px)`;
                                 })(),
-                                backgroundSize: `${Math.max(12, 20 * view.zoom * (view.zoom < 0.6 ? 2 : 1))}px ${Math.max(12, 20 * view.zoom * (view.zoom < 0.6 ? 2 : 1))}px`,
+                                backgroundSize: `${Math.max(12, Math.round(20 * view.zoom * (view.zoom < 0.6 ? 2 : 1)))}px ${Math.max(12, Math.round(20 * view.zoom * (view.zoom < 0.6 ? 2 : 1)))}px`,
                                 backgroundPosition: `${Math.round(view.x)}px ${Math.round(view.y)}px`,
                                 backgroundRepeat: 'repeat',
                                 WebkitFontSmoothing: 'antialiased',
@@ -31111,11 +31150,9 @@ ${inputText.substring(0, 15000)} ... (截断)
                                     : historyNavItems;
                                 if (!items.length) return;
 
-                                let currentIndex = items.findIndex(h => h.id === currentItem.id);
-                                if (currentIndex === -1) {
-                                    items = historyNavItems;
-                                    currentIndex = items.findIndex(h => h.id === currentItem.id);
-                                    if (currentIndex === -1) return;
+                                let currentIndex = getHistoryNavAnchorIndex(currentItem, items);
+                                if (currentIndex === -1) return;
+                                if (!snapshotIds || snapshotIds.length === 0) {
                                     lightboxHistorySnapshotRef.current = items.map(h => h.id);
                                 }
 
